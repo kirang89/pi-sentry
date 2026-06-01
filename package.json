@@ -1,0 +1,37 @@
+{
+  "name": "pi-sentry",
+  "version": "0.1.0",
+  "description": "A Pi extension that blocks sensitive file reads and redacts secrets before they reach the model or session history.",
+  "files": [
+    "extensions",
+    "README.md",
+    "adrs"
+  ],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "security",
+    "secrets",
+    "redaction"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/sentry.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
