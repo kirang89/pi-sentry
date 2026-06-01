@@ -164,4 +164,29 @@ describe("pi-sentry extension modes", () => {
       "pi-sentry mode set to strict",
     ]);
   });
+
+  it("blocks sensitive read, grep, edit, and write tool calls in strict mode", async () => {
+    const harness = createHarness();
+    await setSentryMode(harness, "strict");
+
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("read", { path: ".env" }))).block, true);
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("grep", { pattern: "token", path: ".env" }))).block, true);
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("edit", { path: ".env", edits: [] }))).block, true);
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("write", { path: ".env", content: "TOKEN=value" }))).block, true);
+  });
+
+  it("blocks sensitive user bash commands in strict mode", async () => {
+    const harness = createHarness();
+    await setSentryMode(harness, "strict");
+
+    const result = await emit(harness, "user_bash", {
+      type: "user_bash",
+      command: "cat .env",
+      excludeFromContext: false,
+      cwd: process.cwd(),
+    });
+
+    assert.equal(result.result.exitCode, 1);
+    assert.match(result.result.output, /Blocked user bash command/);
+  });
 });

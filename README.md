@@ -30,15 +30,19 @@ Reload an active Pi session with `/reload` after installing.
 
 ### Sensitive file reads
 
-Blocks `read` access to files such as `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files.
+Blocks `read`, `edit`, and `write` access to files such as `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files in strict mode.
 
 ### Shell exfiltration
 
-Blocks common `bash` paths such as `cat .env`, `rg token ~/.aws/credentials`, `printenv`, `gh auth token`, and `kubectl config view --raw`.
+Blocks common tool and user `bash` paths such as `cat .env`, `rg token ~/.aws/credentials`, `printenv`, `gh auth token`, and `kubectl config view --raw` in strict mode.
 
 ### Literal secrets in tool calls
 
-Blocks tool calls containing secret-like values instead of rewriting arguments, because rewriting commands can silently change behavior.
+Blocks tool calls containing secret-like values in strict mode instead of rewriting arguments, because rewriting commands can silently change behavior.
+
+### Search leakage
+
+Blocks `grep` searches targeting sensitive paths or globs in strict mode.
 
 ### Tool output leakage
 
@@ -72,8 +76,8 @@ Switch modes inside Pi with `/sentry strict` or `/sentry redact-only`.
 
 Available modes:
 
-- `strict`: block known risky reads/commands before execution, and redact any secrets that still appear in inputs, outputs, or session messages.
-- `redact-only`: allow tool calls to run, but redact sensitive data from inputs, outputs, and session messages.
+- `strict`: block known risky reads, searches, file mutations, and commands before execution, and redact any secrets that still appear in inputs, outputs, or session messages.
+- `redact-only`: allow tool calls and user bash commands to run, but redact sensitive data from inputs, outputs, and session messages.
 
 ## Development
 

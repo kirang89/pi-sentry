@@ -295,6 +295,27 @@ function parseSentryMode(input: string): SentryMode | undefined {
   return SENTRY_MODES.has(mode as SentryMode) ? (mode as SentryMode) : undefined;
 }
 
+function blockedBashResult(ctx: SentryContext, reason: string) {
+  notify(ctx, reason, "warning");
+  return {
+    result: {
+      output: reason,
+      exitCode: 1,
+      cancelled: false,
+      truncated: false,
+    },
+  };
+}
+
+function isSensitiveGrepInput(input: Record<string, unknown>): boolean {
+  return [input.path, input.glob].some((value) => typeof value === "string" && isSensitivePath(value));
+}
+
+function getSensitiveFileMutationPath(toolName: string, input: Record<string, unknown>): string | undefined {
+  if (toolName !== "edit" && toolName !== "write") return undefined;
+  return typeof input.path === "string" && isSensitivePath(input.path) ? input.path : undefined;
+}
+
 /**
  * Filter or block sensitive data before it reaches the model or long-lived session history.
  */
@@ -343,6 +364,15 @@ export default function (pi: ExtensionAPI) {
       return blockRiskyOperation(ctx, `Blocked read of sensitive file: ${event.input.path}`);
     }
 
+    const sensitiveMutationPath = getSensitiveFileMutationPath(event.toolName, event.input);
+    if (sensitiveMutationPath) {
+      return blockRiskyOperation(ctx, `Blocked ${event.toolName} of sensitive file: ${sensitiveMutationPath}`);
+    }
+
+    if (event.toolName === "grep" && isSensitiveGrepInput(event.input)) {
+      return blockRiskyOperation(ctx, "Blocked grep of sensitive path or glob");
+    }
+
     if (event.toolName === "bash" && typeof event.input.command === "string" && isSensitiveBashCommand(event.input.command)) {
       return blockRiskyOperation(ctx, "Blocked bash command likely to expose secrets");
     }
@@ -355,6 +385,13 @@ export default function (pi: ExtensionAPI) {
     }
 
     return undefined;
+  });
+
+  pi.on("user_bash", async (event, ctx) => {
+    if (mode === "redact-only") return undefined;
+    if (!isSensitiveBashCommand(event.command)) return undefined;
+
+    return blockedBashResult(ctx, "Blocked user bash command likely to expose secrets");
   });
 
   pi.on("tool_result", async (event, ctx) => {
