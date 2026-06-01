@@ -12,16 +12,10 @@ pi install git:https://github.com/kirang89/pi-sentry.git
 pi install git:https://github.com/kirang89/pi-sentry.git@v0.1.0
 ```
 
-From this local checkout:
-
-```bash
-pi install /Users/kiran/personal/pi-sentry
-```
-
 For one-off testing without installing:
 
 ```bash
-pi -e /Users/kiran/personal/pi-sentry
+pi -e git:https://github.com/kirang89/pi-sentry.git
 ```
 
 Reload an active Pi session with `/reload` after installing.
