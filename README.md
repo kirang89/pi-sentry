@@ -62,11 +62,13 @@ The redactor covers common formats:
 
 ## Modes
 
-The current default is strict mode, implemented as a constant in `extensions/sentry.ts`:
+The current default is redact-only mode, implemented as a constant in `extensions/sentry.ts`:
 
 ```ts
-const DEFAULT_MODE = "strict";
+const DEFAULT_MODE = "redact-only";
 ```
+
+Switch modes inside Pi with `/sentry strict` or `/sentry redact-only`.
 
 Available modes:
 

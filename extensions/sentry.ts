@@ -15,8 +15,9 @@ type RedactionResult<T> = {
 
 type SentryMode = "strict" | "redact-only";
 
-const DEFAULT_MODE: SentryMode = "strict";
+const DEFAULT_MODE: SentryMode = "redact-only";
 const MAX_REDACTION_DEPTH = 8;
+const SENTRY_MODES = new Set<SentryMode>(["strict", "redact-only"]);
 
 const SECRET_KEY_FRAGMENT =
   "(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]?access[_-]?key)?|token|password|passwd|pwd|private[_-]?key)";
@@ -289,11 +290,35 @@ function blockRiskyOperation(ctx: SentryContext, reason: string) {
   return { block: true, reason };
 }
 
+function parseSentryMode(input: string): SentryMode | undefined {
+  const mode = input.trim();
+  return SENTRY_MODES.has(mode as SentryMode) ? (mode as SentryMode) : undefined;
+}
+
 /**
  * Filter or block sensitive data before it reaches the model or long-lived session history.
  */
 export default function (pi: ExtensionAPI) {
-  const mode = DEFAULT_MODE;
+  let mode = DEFAULT_MODE;
+
+  pi.registerCommand("sentry", {
+    description: "Show or set pi-sentry mode: strict or redact-only",
+    handler: async (args, ctx) => {
+      if (!args.trim()) {
+        notify(ctx, `pi-sentry mode: ${mode}`, "info");
+        return;
+      }
+
+      const nextMode = parseSentryMode(args);
+      if (!nextMode) {
+        notify(ctx, "Usage: /sentry strict | /sentry redact-only", "error");
+        return;
+      }
+
+      mode = nextMode;
+      notify(ctx, `pi-sentry mode set to ${mode}`, "info");
+    },
+  });
 
   pi.on("input", async (event, ctx) => {
     const redacted = redactText(event.text);

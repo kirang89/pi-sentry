@@ -1,11 +1,67 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import {
+import sentryExtension, {
   containsSecretLikeText,
   isSensitiveBashCommand,
   isSensitivePath,
   redactText,
 } from "../extensions/sentry.ts";
+
+type Handler = (event: any, ctx: any) => any;
+
+type Harness = {
+  handlers: Record<string, Handler[]>;
+  commands: Record<string, { handler: Handler }>;
+  ctx: {
+    hasUI: boolean;
+    ui: { notifications: Array<{ message: string; level: string }>; notify(message: string, level: string): void };
+  };
+};
+
+function createHarness(): Harness {
+  const handlers: Harness["handlers"] = {};
+  const commands: Harness["commands"] = {};
+  const ctx: Harness["ctx"] = {
+    hasUI: true,
+    ui: {
+      notifications: [],
+      notify(message: string, level: string) {
+        this.notifications.push({ message, level });
+      },
+    },
+  };
+
+  sentryExtension({
+    on(eventName: string, handler: Handler) {
+      handlers[eventName] ??= [];
+      handlers[eventName].push(handler);
+    },
+    registerCommand(name: string, command: { handler: Handler }) {
+      commands[name] = command;
+    },
+  } as any);
+
+  return { handlers, commands, ctx };
+}
+
+async function emit(harness: Harness, eventName: string, event: any): Promise<any> {
+  let result: any;
+  for (const handler of harness.handlers[eventName] ?? []) {
+    result = await handler(event, harness.ctx);
+    if (result !== undefined) return result;
+  }
+  return result;
+}
+
+async function setSentryMode(harness: Harness, mode: "strict" | "redact-only"): Promise<void> {
+  const command = harness.commands.sentry;
+  assert.ok(command);
+  await command.handler(mode, harness.ctx);
+}
+
+function toolCallEvent(toolName: string, input: Record<string, unknown>) {
+  return { type: "tool_call", toolCallId: `${toolName}-1`, toolName, input };
+}
 
 describe("redactText", () => {
   it("redacts JSON secret key-value pairs", () => {
@@ -83,5 +139,29 @@ describe("containsSecretLikeText", () => {
   it("detects embedded secret values", () => {
     const input = JSON.stringify({ apiKey: "abcdefghijkl" + "mnopqrstuvwx" });
     assert.equal(containsSecretLikeText(input), true);
+  });
+});
+
+describe("pi-sentry extension modes", () => {
+  it("defaults to redact-only mode", async () => {
+    const harness = createHarness();
+
+    const result = await emit(harness, "tool_call", toolCallEvent("read", { path: ".env" }));
+
+    assert.equal(result, undefined);
+  });
+
+  it("switches modes with the /sentry command", async () => {
+    const harness = createHarness();
+
+    const command = harness.commands.sentry;
+    assert.ok(command);
+    await command.handler("", harness.ctx);
+    await setSentryMode(harness, "strict");
+
+    assert.deepEqual(harness.ctx.ui.notifications.map((item) => item.message), [
+      "pi-sentry mode: redact-only",
+      "pi-sentry mode set to strict",
+    ]);
   });
 });
