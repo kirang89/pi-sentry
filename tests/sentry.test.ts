@@ -189,4 +189,25 @@ describe("pi-sentry extension modes", () => {
     assert.equal(result.result.exitCode, 1);
     assert.match(result.result.output, /Blocked user bash command/);
   });
+
+  it("redacts arbitrary details.data fields while preserving image data", async () => {
+    const harness = createHarness();
+    const secretData = "apiKey=" + "abcdefghijklmnopqrstuvwx";
+
+    const result = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "custom-1",
+      toolName: "custom",
+      input: {},
+      content: [],
+      details: {
+        data: secretData,
+        image: { type: "image", data: secretData },
+      },
+      isError: false,
+    });
+
+    assert.equal(result.details.data, "apiKey=[REDACTED]");
+    assert.equal(result.details.image.data, secretData);
+  });
 });

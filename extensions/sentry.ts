@@ -180,8 +180,9 @@ function redactUnknownValue(value: unknown, depth = 0, seen = new WeakSet<object
 
   let modified = false;
   const next: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(value)) {
-    if (key === "data" && typeof child === "string") {
+  const current = value as Record<string, unknown>;
+  for (const [key, child] of Object.entries(current)) {
+    if (key === "data" && typeof child === "string" && current.type === "image") {
       next[key] = child;
       continue;
     }
