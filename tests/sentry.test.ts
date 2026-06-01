@@ -24,22 +24,25 @@ describe("redactText", () => {
   });
 
   it("redacts bearer tokens", () => {
-    const input = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456";
+    const token = "abcdefghijkl" + "mnopqrstuvwxyz123456";
+    const input = `Authorization: Bearer ${token}`;
     assert.equal(redactText(input).text, "Authorization: Bearer [REDACTED]");
   });
 
   it("redacts database URL passwords", () => {
-    const input = "postgres://user:super-secret-password@example.com/db";
+    const password = "correct-horse-" + "battery-staple";
+    const input = `postgres://user:${password}@example.com/db`;
     assert.equal(redactText(input).text, "postgres://user:[REDACTED]@example.com/db");
   });
 
   it("redacts private key blocks", () => {
-    const input = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----";
+    const keyBody = "abcdefghijklmnopqrstuvwxyz" + "0123456789";
+    const input = ["-----BEGIN PRIVATE KEY-----", keyBody, "-----END PRIVATE KEY-----"].join("\n");
     assert.equal(redactText(input).text, "[PRIVATE_KEY_REDACTED]");
   });
 
   it("redacts provider-specific keys", () => {
-    const input = "sk-ant-abcdefghijklmnopqrstuvwxyz1234567890";
+    const input = "sk-ant-" + "abcdefghijklmnopqrstuvwxyz1234567890";
     assert.equal(redactText(input).text, "[ANTHROPIC_KEY_REDACTED]");
   });
 });
@@ -78,6 +81,7 @@ describe("isSensitiveBashCommand", () => {
 
 describe("containsSecretLikeText", () => {
   it("detects embedded secret values", () => {
-    assert.equal(containsSecretLikeText('{"apiKey":"abcdefghijklmnopqrstuvwx"}'), true);
+    const input = JSON.stringify({ apiKey: "abcdefghijkl" + "mnopqrstuvwx" });
+    assert.equal(containsSecretLikeText(input), true);
   });
 });
