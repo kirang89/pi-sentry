@@ -13,7 +13,7 @@ type RedactionResult<T> = {
   modified: boolean;
 };
 
-type SentryMode = "strict" | "warn" | "redact-only";
+type SentryMode = "strict" | "redact-only";
 
 const DEFAULT_MODE: SentryMode = "strict";
 const MAX_REDACTION_DEPTH = 8;
@@ -273,7 +273,6 @@ type SentryContext = {
   hasUI?: boolean;
   ui?: {
     notify(message: string, level: "info" | "warning" | "error"): void;
-    confirm(title: string, message: string): Promise<boolean>;
   };
 };
 
@@ -285,15 +284,7 @@ function notify(
   if (ctx.hasUI) ctx.ui?.notify(message, level);
 }
 
-async function maybeBlock(ctx: SentryContext, mode: SentryMode, reason: string) {
-  if (mode === "warn" && ctx.hasUI && ctx.ui) {
-    const allowed = await ctx.ui.confirm("pi-sentry warning", `${reason}\n\nAllow anyway?`);
-    if (allowed) {
-      notify(ctx, `Allowed risky operation: ${reason}`, "warning");
-      return undefined;
-    }
-  }
-
+function blockRiskyOperation(ctx: SentryContext, reason: string) {
   notify(ctx, reason, "warning");
   return { block: true, reason };
 }
@@ -324,18 +315,18 @@ export default function (pi: ExtensionAPI) {
     if (mode === "redact-only") return undefined;
 
     if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path)) {
-      return maybeBlock(ctx, mode, `Blocked read of sensitive file: ${event.input.path}`);
+      return blockRiskyOperation(ctx, `Blocked read of sensitive file: ${event.input.path}`);
     }
 
     if (event.toolName === "bash" && typeof event.input.command === "string" && isSensitiveBashCommand(event.input.command)) {
-      return maybeBlock(ctx, mode, "Blocked bash command likely to expose secrets");
+      return blockRiskyOperation(ctx, "Blocked bash command likely to expose secrets");
     }
 
     // If a tool argument contains a secret literal, executing it would persist the secret in
     // tool-call metadata and often in shell history. Block instead of rewriting arguments,
     // because redaction could silently change command semantics.
     if (containsSecretLikeText(toolInputAsText(event.input))) {
-      return maybeBlock(ctx, mode, `Blocked ${event.toolName} call containing secret-like text`);
+      return blockRiskyOperation(ctx, `Blocked ${event.toolName} call containing secret-like text`);
     }
 
     return undefined;

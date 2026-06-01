@@ -4,18 +4,18 @@
 
 ## Install
 
+From GitHub:
+
+```bash
+pi install git:https://github.com/kirang89/pi-sentry.git
+# or pin a tag/commit
+pi install git:https://github.com/kirang89/pi-sentry.git@v0.1.0
+```
+
 From this local checkout:
 
 ```bash
 pi install /Users/kiran/personal/pi-sentry
-```
-
-After publishing to GitHub:
-
-```bash
-pi install git:github.com/<user>/pi-sentry
-# or pin a tag/commit
-pi install git:github.com/<user>/pi-sentry@v0.1.0
 ```
 
 For one-off testing without installing:
@@ -28,12 +28,25 @@ Reload an active Pi session with `/reload` after installing.
 
 ## What it protects
 
-- Blocks `read` tool access to sensitive files such as `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files.
-- Blocks common `bash` exfiltration paths such as `cat .env`, `rg token ~/.aws/credentials`, `printenv`, `gh auth token`, and `kubectl config view --raw`.
-- Blocks tool calls containing literal secret-like values instead of rewriting them, because rewriting command arguments can silently change behavior.
-- Redacts secrets from tool outputs, including error outputs.
-- Redacts text fields in session messages so assistant tool-call arguments and user/bash messages are less likely to persist secrets.
-- Recursively redacts string fields in tool `details` metadata while skipping image data.
+### Sensitive file reads
+
+Blocks `read` access to files such as `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files.
+
+### Shell exfiltration
+
+Blocks common `bash` paths such as `cat .env`, `rg token ~/.aws/credentials`, `printenv`, `gh auth token`, and `kubectl config view --raw`.
+
+### Literal secrets in tool calls
+
+Blocks tool calls containing secret-like values instead of rewriting arguments, because rewriting commands can silently change behavior.
+
+### Tool output leakage
+
+Redacts secrets from tool outputs, including stderr and error details.
+
+### Session history leakage
+
+Redacts text fields in session messages and recursively redacts string fields in tool `details` metadata while skipping image data.
 
 ## Redaction coverage
 
@@ -57,9 +70,8 @@ const DEFAULT_MODE = "strict";
 
 Available modes:
 
-- `strict`: block risky reads/commands and redact outputs.
-- `warn`: ask for confirmation when a UI is available, otherwise block.
-- `redact-only`: preserve the original filter-output behavior and only redact results/messages.
+- `strict`: block known risky reads/commands before execution, and redact any secrets that still appear in inputs, outputs, or session messages.
+- `redact-only`: allow tool calls to run, but redact sensitive data from inputs, outputs, and session messages.
 
 ## Development
 
@@ -69,6 +81,3 @@ npm test
 npm run typecheck
 ```
 
-## Limitations
-
-No regex-only secret detector is perfect. This extension is a defense-in-depth layer, not a substitute for avoiding secret material in prompts, commands, repositories, logs, or generated files.
