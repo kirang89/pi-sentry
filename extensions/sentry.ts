@@ -155,7 +155,11 @@ function extractPathLikeTokens(text: string): string[] {
     .filter(Boolean);
 }
 
-function redactUnknownValue(value: unknown, depth = 0, seen = new WeakSet<object>()): RedactionResult<unknown> {
+function redactUnknownValue(
+  value: unknown,
+  depth = 0,
+  cache = new WeakMap<object, RedactionResult<unknown>>(),
+): RedactionResult<unknown> {
   if (typeof value === "string") {
     const redacted = redactText(value);
     return { value: redacted.text, modified: redacted.modified };
@@ -165,33 +169,47 @@ function redactUnknownValue(value: unknown, depth = 0, seen = new WeakSet<object
     return { value, modified: false };
   }
 
-  if (seen.has(value)) return { value, modified: false };
-  seen.add(value);
+  const cached = cache.get(value);
+  if (cached) return cached;
 
   if (Array.isArray(value)) {
+    const next: unknown[] = [];
+    const result: RedactionResult<unknown> = { value: next, modified: false };
+    cache.set(value, result);
+
     let modified = false;
-    const next = value.map((item) => {
-      const redacted = redactUnknownValue(item, depth + 1, seen);
+    for (const item of value) {
+      const redacted = redactUnknownValue(item, depth + 1, cache);
       if (redacted.modified) modified = true;
-      return redacted.value;
-    });
-    return { value: modified ? next : value, modified };
+      next.push(redacted.value);
+    }
+
+    result.modified = modified;
+    result.value = modified ? next : value;
+    return result;
   }
 
-  let modified = false;
-  const next: Record<string, unknown> = {};
   const current = value as Record<string, unknown>;
+  const next: Record<string, unknown> = {};
+  const result: RedactionResult<unknown> = { value: next, modified: false };
+  cache.set(value, result);
+
+  let modified = false;
   for (const [key, child] of Object.entries(current)) {
     if (key === "data" && typeof child === "string" && current.type === "image") {
       next[key] = child;
       continue;
     }
-    const redacted = redactUnknownValue(child, depth + 1, seen);
+    // Cache redacted objects so repeated references reuse the safe copy instead of leaking
+    // the original object through a later reference.
+    const redacted = redactUnknownValue(child, depth + 1, cache);
     if (redacted.modified) modified = true;
     next[key] = redacted.value;
   }
 
-  return { value: modified ? next : value, modified };
+  result.modified = modified;
+  result.value = modified ? next : value;
+  return result;
 }
 
 function redactMessage(message: unknown): RedactionResult<unknown> {

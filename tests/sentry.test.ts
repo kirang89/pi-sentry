@@ -210,4 +210,26 @@ describe("pi-sentry extension modes", () => {
     assert.equal(result.details.data, "apiKey=[REDACTED]");
     assert.equal(result.details.image.data, secretData);
   });
+
+  it("redacts repeated object references without leaking the original object", async () => {
+    const harness = createHarness();
+    const secretData = "apiKey=" + "abcdefghijklmnopqrstuvwx";
+    const shared = { token: secretData };
+
+    const result = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "custom-1",
+      toolName: "custom",
+      input: {},
+      content: [],
+      details: {
+        first: shared,
+        second: shared,
+      },
+      isError: false,
+    });
+
+    assert.equal(result.details.first.token, "apiKey=[REDACTED]");
+    assert.equal(result.details.second.token, "apiKey=[REDACTED]");
+  });
 });
