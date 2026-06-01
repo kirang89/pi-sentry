@@ -190,6 +190,41 @@ describe("pi-sentry extension modes", () => {
     assert.match(result.result.output, /Blocked user bash command/);
   });
 
+  it("redacts sensitive user input", async () => {
+    const harness = createHarness();
+    const token = "abcdefghijkl" + "mnopqrstuvwxyz123456";
+
+    const result = await emit(harness, "input", {
+      type: "input",
+      text: `Authorization: Bearer ${token}`,
+      images: undefined,
+      source: "interactive",
+    });
+
+    assert.deepEqual(result, {
+      action: "transform",
+      text: "Authorization: Bearer [REDACTED]",
+      images: undefined,
+    });
+  });
+
+  it("redacts sensitive read results in redact-only mode", async () => {
+    const harness = createHarness();
+    const apiKey = "abcdefghijkl" + "mnopqrstuvwx";
+
+    const result = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "read-1",
+      toolName: "read",
+      input: { path: ".env" },
+      content: [{ type: "text", text: `API_KEY=${apiKey}` }],
+      details: undefined,
+      isError: false,
+    });
+
+    assert.deepEqual(result.content, [{ type: "text", text: "[Contents of .env redacted for security]" }]);
+  });
+
   it("redacts arbitrary details.data fields while preserving image data", async () => {
     const harness = createHarness();
     const secretData = "apiKey=" + "abcdefghijklmnopqrstuvwx";
