@@ -98,8 +98,23 @@ describe("redactText", () => {
 
   it("redacts private key blocks", () => {
     const keyBody = "abcdefghijklmnopqrstuvwxyz" + "0123456789";
-    const input = ["-----BEGIN PRIVATE KEY-----", keyBody, "-----END PRIVATE KEY-----"].join("\n");
+    const begin = "-----BEGIN " + "PRIVATE KEY-----";
+    const end = "-----END " + "PRIVATE KEY-----";
+    const input = [begin, keyBody, end].join("\n");
     assert.equal(redactText(input).text, "[PRIVATE_KEY_REDACTED]");
+  });
+
+  it("redacts escaped private key env values", () => {
+    const keyBody = "abcdefghijklmnopqrstuvwxyz" + "0123456789";
+    const begin = "-----BEGIN " + "PRIVATE KEY-----";
+    const end = "-----END " + "PRIVATE KEY-----";
+    const input = String.raw`PRIVATE_KEY=${begin}\n${keyBody}\n${end}`;
+    assert.equal(redactText(input).text, "PRIVATE_KEY=[PRIVATE_KEY_REDACTED]");
+  });
+
+  it("redacts session cookie env values", () => {
+    const input = "SESSION_COOKIE=s%3Arealworld.session.cookie.000000000000";
+    assert.equal(redactText(input).text, "SESSION_COOKIE=[REDACTED]");
   });
 
   it("redacts provider-specific keys", () => {
@@ -113,6 +128,9 @@ describe("isSensitivePath", () => {
     assert.equal(isSensitivePath(".env"), true);
     assert.equal(isSensitivePath("/home/me/.aws/credentials"), true);
     assert.equal(isSensitivePath("/home/me/.kube/config"), true);
+    assert.equal(isSensitivePath("/home/me/.ssh"), true);
+    assert.equal(isSensitivePath("/home/me/.ssh/config"), true);
+    assert.equal(isSensitivePath("/home/me/.ssh/known_hosts"), true);
     assert.equal(isSensitivePath("terraform.tfvars"), true);
   });
 
@@ -221,9 +239,19 @@ describe("pi-sentry extension modes", () => {
   it("defaults to redact-only mode", async () => {
     const harness = createHarness();
 
-    const result = await emit(harness, "tool_call", toolCallEvent("read", { path: ".env" }));
+    const toolCallResult = await emit(harness, "tool_call", toolCallEvent("read", { path: ".env" }));
+    assert.equal(toolCallResult, undefined);
 
-    assert.equal(result, undefined);
+    const toolResult = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "read-1",
+      toolName: "read",
+      input: { path: ".env" },
+      content: [{ type: "text", text: "API_KEY=" + "abcdefghijklmnopqrstuvwx" }],
+      details: undefined,
+      isError: false,
+    });
+    assert.deepEqual(toolResult.content, [{ type: "text", text: "[Contents of .env redacted for security]" }]);
   });
 
   it("switches modes with the /sentry command", async () => {
@@ -263,6 +291,27 @@ describe("pi-sentry extension modes", () => {
     assert.equal((await emit(harness, "tool_call", toolCallEvent("grep", { pattern: "token", path: ".env" }))).block, true);
     assert.equal((await emit(harness, "tool_call", toolCallEvent("edit", { path: ".env", edits: [] }))).block, true);
     assert.equal((await emit(harness, "tool_call", toolCallEvent("write", { path: ".env", content: "TOKEN=value" }))).block, true);
+  });
+
+  it("allows safe tool calls in strict mode", async () => {
+    const harness = createHarness();
+    await setSentryMode(harness, "strict");
+
+    assert.equal(await emit(harness, "tool_call", toolCallEvent("read", { path: "README.md" })), undefined);
+    assert.equal(await emit(harness, "tool_call", toolCallEvent("grep", { pattern: "sentry", path: "README.md" })), undefined);
+    assert.equal(await emit(harness, "tool_call", toolCallEvent("bash", { command: "echo hello" })), undefined);
+    assert.equal(
+      await emit(harness, "tool_call", toolCallEvent("write", { path: "notes.txt", content: "safe content" })),
+      undefined,
+    );
+  });
+
+  it("blocks .ssh directory access in strict mode", async () => {
+    const harness = createHarness();
+    await setSentryMode(harness, "strict");
+
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("read", { path: "~/.ssh/config" }))).block, true);
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("bash", { command: "cat ~/.ssh/known_hosts" }))).block, true);
   });
 
   it("blocks sensitive user bash commands in strict mode", async () => {

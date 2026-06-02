@@ -23,13 +23,65 @@ export type SentryConfig = {
   blockPaths: string[];
 };
 
-const DEFAULT_MODE: SentryMode = "redact-only";
+const MODE_STRICT: SentryMode = "strict";
+const MODE_REDACT_ONLY: SentryMode = "redact-only";
+const MODE_OFF: SentryMode = "off";
+const SENTRY_MODE_VALUES = [MODE_STRICT, MODE_REDACT_ONLY, MODE_OFF] as const;
+
+const DEFAULT_MODE: SentryMode = MODE_REDACT_ONLY;
 const MAX_REDACTION_DEPTH = 8;
-const SENTRY_MODES = new Set<SentryMode>(["strict", "redact-only", "off"]);
+const SENTRY_MODES = new Set<SentryMode>(SENTRY_MODE_VALUES);
 const EMPTY_SENTRY_CONFIG: SentryConfig = { allowPaths: [], blockPaths: [] };
 
+const SENTRY_CONFIG_FILE_NAME = "pi-sentry.json";
+const DEFAULT_PI_CONFIG_DIR_SEGMENTS = [".pi", "agent"] as const;
+const SENTRY_COMMAND_NAME = "sentry";
+
+const EVENT_SESSION_START = "session_start";
+const EVENT_INPUT = "input";
+const EVENT_MESSAGE_END = "message_end";
+const EVENT_TOOL_CALL = "tool_call";
+const EVENT_USER_BASH = "user_bash";
+const EVENT_TOOL_RESULT = "tool_result";
+
+const TOOL_READ = "read";
+const TOOL_GREP = "grep";
+const TOOL_BASH = "bash";
+const TOOL_EDIT = "edit";
+const TOOL_WRITE = "write";
+const MUTATING_FILE_TOOLS = new Set([TOOL_EDIT, TOOL_WRITE]);
+
+const CONTENT_TYPE_TEXT = "text";
+const CONTENT_TYPE_IMAGE = "image";
+const CONTENT_TYPE_THINKING = "thinking";
+const CONTENT_TYPE_TOOL_CALL = "toolCall";
+const FIELD_ARGUMENTS = "arguments";
+const FIELD_DATA = "data";
+const FIELD_TEXT = "text";
+const FIELD_THINKING = "thinking";
+const FIELD_TYPE = "type";
+const REDACTABLE_MESSAGE_FIELDS = ["details", "command", "output", "errorMessage", "summary"] as const;
+const SENTRY_COMMAND_DESCRIPTION = "Show or set pi-sentry mode: strict, redact-only, or off";
+
+const NOTIFICATION_MESSAGES = {
+  modeStatus: (mode: SentryMode) => `pi-sentry mode: ${mode}`,
+  modeChanged: (mode: SentryMode) => `pi-sentry mode set to ${mode}`,
+  modeUsage: `Usage: ${SENTRY_MODE_VALUES.map((mode) => `/${SENTRY_COMMAND_NAME} ${mode}`).join(" | ")}`,
+  redactedUserInput: "Sensitive data redacted from user input",
+  redactedSessionMessage: "Sensitive data redacted from session message",
+  redactedToolOutput: "Sensitive data redacted from tool output",
+  blockedUserBash: "Blocked user bash command likely to expose secrets",
+  blockedGrep: "Blocked grep of sensitive path or glob",
+  blockedBashTool: "Blocked bash command likely to expose secrets",
+  blockedSecretToolCall: (toolName: string) => `Blocked ${toolName} call containing secret-like text`,
+  blockedSensitiveRead: (path: string) => `Blocked read of sensitive file: ${path}`,
+  blockedSensitiveMutation: (toolName: string, path: string) => `Blocked ${toolName} of sensitive file: ${path}`,
+  redactedSensitiveFile: (path: string) => `Redacted contents of sensitive file: ${path}`,
+  redactedSensitiveFileContents: (path: string) => `[Contents of ${path} redacted for security]`,
+} as const;
+
 const SECRET_KEY_FRAGMENT =
-  "(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]?access[_-]?key)?|token|password|passwd|pwd|private[_-]?key)";
+  "(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]?access[_-]?key)?|token|password|passwd|pwd|private[_-]?key|session[_-]?cookie)";
 
 const quotedSecretValuePattern = new RegExp(
   `((?:^|[\\s{,;])['"]?[\\w.-]*${SECRET_KEY_FRAGMENT}[\\w.-]*['"]?\\s*[:=]\\s*)(['"])(?:\\\\.|(?!\\2)[^\\\\\\r\\n]){8,}\\2`,
@@ -37,7 +89,7 @@ const quotedSecretValuePattern = new RegExp(
 );
 
 const unquotedSecretValuePattern = new RegExp(
-  `((?:^|[\\s{,;])['"]?[\\w.-]*${SECRET_KEY_FRAGMENT}[\\w.-]*['"]?\\s*[:=]\\s*)([^\\s'",}\\]]{8,})`,
+  `((?:^|[\\s{,;])['"]?[\\w.-]*${SECRET_KEY_FRAGMENT}[\\w.-]*['"]?\\s*[:=]\\s*)([^\\s'",}\\]\\[]{8,})`,
   "gim",
 );
 
@@ -71,6 +123,13 @@ export const sensitivePatterns: SensitivePattern[] = [
   { pattern: /\bSG\.[a-zA-Z0-9_-]{16,}\.[a-zA-Z0-9_-]{16,}\b/g, replacement: "[SENDGRID_KEY_REDACTED]" },
   { pattern: /\blin_api_[a-zA-Z0-9]{20,}\b/g, replacement: "[LINEAR_KEY_REDACTED]" },
   {
+    // Redact full private-key blocks before generic key/value redaction can partially
+    // replace only the first token (for example `PRIVATE_KEY=-----BEGIN ...`).
+    pattern:
+      /-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----/gi,
+    replacement: "[PRIVATE_KEY_REDACTED]",
+  },
+  {
     pattern: quotedSecretValuePattern,
     replacement: (_match, prefix, quote) => `${String(prefix)}${String(quote)}[REDACTED]${String(quote)}`,
   },
@@ -81,11 +140,6 @@ export const sensitivePatterns: SensitivePattern[] = [
     replacement: "[JWT_REDACTED]",
   },
   { pattern: /([a-z][a-z0-9+.-]*:\/\/[^:\s/@]+:)[^@\s]+(@)/gi, replacement: "$1[REDACTED]$2" },
-  {
-    pattern:
-      /-----BEGIN (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |ENCRYPTED |PGP )?PRIVATE KEY(?: BLOCK)?-----/gi,
-    replacement: "[PRIVATE_KEY_REDACTED]",
-  },
 ];
 
 const sensitiveFilePatterns = [
@@ -102,7 +156,7 @@ const sensitiveFilePatterns = [
   /(^|\/)\.kube\/config$/i,
   /(^|\/)\.aws\/(credentials|config)$/i,
   /(^|\/)\.gcloud\/application_default_credentials\.json$/i,
-  /(^|\/)\.ssh\/id_[^/]+$/i,
+  /(^|\/)\.ssh($|\/)/i,
   /(^|\/)terraform\.tfstate(\.backup)?$/i,
   /\.tfvars(\.json)?$/i,
   /(^|\/)service[-_]?account[^/]*\.json$/i,
@@ -154,7 +208,7 @@ export function parseSentryConfig(value: unknown): SentryConfig {
 }
 
 export async function loadSentryConfig(configDir = getDefaultPiConfigDir()): Promise<SentryConfig> {
-  const configPath = join(configDir, "pi-sentry.json");
+  const configPath = join(configDir, SENTRY_CONFIG_FILE_NAME);
 
   try {
     const content = await readFile(configPath, "utf8");
@@ -218,7 +272,7 @@ function parsePathList(value: unknown, fieldName: string): string[] {
 }
 
 function getDefaultPiConfigDir(): string {
-  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ...DEFAULT_PI_CONFIG_DIR_SEGMENTS);
 }
 
 function isMissingFileError(error: unknown): boolean {
@@ -286,51 +340,66 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+type RedactionCache = WeakMap<object, RedactionResult<unknown>>;
+
 function redactUnknownValue(
   value: unknown,
   depth = 0,
-  cache = new WeakMap<object, RedactionResult<unknown>>(),
+  cache: RedactionCache = new WeakMap<object, RedactionResult<unknown>>(),
 ): RedactionResult<unknown> {
-  if (typeof value === "string") {
-    const redacted = redactText(value);
-    return { value: redacted.text, modified: redacted.modified };
-  }
-
-  if (value === null || typeof value !== "object" || depth >= MAX_REDACTION_DEPTH) {
-    return { value, modified: false };
-  }
+  if (typeof value === "string") return redactStringValue(value);
+  if (!canRedactNestedValue(value, depth)) return { value, modified: false };
 
   const cached = cache.get(value);
   if (cached) return cached;
 
-  if (Array.isArray(value)) {
-    const next: unknown[] = [];
-    const result: RedactionResult<unknown> = { value: next, modified: false };
-    cache.set(value, result);
+  return Array.isArray(value)
+    ? redactArrayValue(value, depth, cache)
+    : redactObjectValue(value as Record<string, unknown>, depth, cache);
+}
 
-    let modified = false;
-    for (const item of value) {
-      const redacted = redactUnknownValue(item, depth + 1, cache);
-      if (redacted.modified) modified = true;
-      next.push(redacted.value);
-    }
+function redactStringValue(value: string): RedactionResult<string> {
+  const redacted = redactText(value);
+  return { value: redacted.text, modified: redacted.modified };
+}
 
-    result.modified = modified;
-    result.value = modified ? next : value;
-    return result;
+function canRedactNestedValue(value: unknown, depth: number): value is object {
+  return value !== null && typeof value === "object" && depth < MAX_REDACTION_DEPTH;
+}
+
+function redactArrayValue(value: unknown[], depth: number, cache: RedactionCache): RedactionResult<unknown> {
+  const next: unknown[] = [];
+  const result: RedactionResult<unknown> = { value: next, modified: false };
+  cache.set(value, result);
+
+  let modified = false;
+  for (const item of value) {
+    const redacted = redactUnknownValue(item, depth + 1, cache);
+    if (redacted.modified) modified = true;
+    next.push(redacted.value);
   }
 
-  const current = value as Record<string, unknown>;
+  result.modified = modified;
+  result.value = modified ? next : value;
+  return result;
+}
+
+function redactObjectValue(
+  value: Record<string, unknown>,
+  depth: number,
+  cache: RedactionCache,
+): RedactionResult<unknown> {
   const next: Record<string, unknown> = {};
   const result: RedactionResult<unknown> = { value: next, modified: false };
   cache.set(value, result);
 
   let modified = false;
-  for (const [key, child] of Object.entries(current)) {
-    if (key === "data" && typeof child === "string" && current.type === "image") {
+  for (const [key, child] of Object.entries(value)) {
+    if (shouldPreserveImageData(value, key, child)) {
       next[key] = child;
       continue;
     }
+
     // Cache redacted objects so repeated references reuse the safe copy instead of leaking
     // the original object through a later reference.
     const redacted = redactUnknownValue(child, depth + 1, cache);
@@ -341,6 +410,10 @@ function redactUnknownValue(
   result.modified = modified;
   result.value = modified ? next : value;
   return result;
+}
+
+function shouldPreserveImageData(current: Record<string, unknown>, key: string, child: unknown): boolean {
+  return key === FIELD_DATA && typeof child === "string" && current[FIELD_TYPE] === CONTENT_TYPE_IMAGE;
 }
 
 function redactMessage(message: unknown): RedactionResult<unknown> {
@@ -364,7 +437,7 @@ function redactMessage(message: unknown): RedactionResult<unknown> {
     }
   }
 
-  for (const field of ["details", "command", "output", "errorMessage", "summary"] as const) {
+  for (const field of REDACTABLE_MESSAGE_FIELDS) {
     if (!(field in current)) continue;
     const redacted = redactUnknownValue(current[field]);
     if (redacted.modified) {
@@ -379,36 +452,41 @@ function redactMessage(message: unknown): RedactionResult<unknown> {
 function redactContentBlocks(blocks: unknown[]): RedactionResult<unknown[]> {
   let modified = false;
   const next = blocks.map((block) => {
-    if (!block || typeof block !== "object") return block;
-    const current = block as Record<string, unknown>;
-
-    if (current.type === "image") return block;
-
-    if (current.type === "text" && typeof current.text === "string") {
-      const redacted = redactText(current.text);
-      if (!redacted.modified) return block;
-      modified = true;
-      return { ...current, text: redacted.text };
-    }
-
-    if (current.type === "thinking" && typeof current.thinking === "string") {
-      const redacted = redactText(current.thinking);
-      if (!redacted.modified) return block;
-      modified = true;
-      return { ...current, thinking: redacted.text };
-    }
-
-    if (current.type === "toolCall") {
-      const redacted = redactUnknownValue(current.arguments);
-      if (!redacted.modified) return block;
-      modified = true;
-      return { ...current, arguments: redacted.value };
-    }
-
-    return block;
+    const redacted = redactContentBlock(block);
+    if (redacted.modified) modified = true;
+    return redacted.value;
   });
 
   return { value: modified ? next : blocks, modified };
+}
+
+function redactContentBlock(block: unknown): RedactionResult<unknown> {
+  if (!block || typeof block !== "object") return { value: block, modified: false };
+
+  const current = block as Record<string, unknown>;
+  if (current[FIELD_TYPE] === CONTENT_TYPE_IMAGE) return { value: block, modified: false };
+  if (current[FIELD_TYPE] === CONTENT_TYPE_TEXT) return redactContentBlockTextField(current, FIELD_TEXT);
+  if (current[FIELD_TYPE] === CONTENT_TYPE_THINKING) return redactContentBlockTextField(current, FIELD_THINKING);
+  if (current[FIELD_TYPE] === CONTENT_TYPE_TOOL_CALL) return redactToolCallContentBlock(current);
+
+  return { value: block, modified: false };
+}
+
+function redactContentBlockTextField(
+  block: Record<string, unknown>,
+  field: typeof FIELD_TEXT | typeof FIELD_THINKING,
+): RedactionResult<unknown> {
+  if (typeof block[field] !== "string") return { value: block, modified: false };
+
+  const redacted = redactText(block[field]);
+  return redacted.modified ? { value: { ...block, [field]: redacted.text }, modified: true } : { value: block, modified: false };
+}
+
+function redactToolCallContentBlock(block: Record<string, unknown>): RedactionResult<unknown> {
+  const redacted = redactUnknownValue(block[FIELD_ARGUMENTS]);
+  return redacted.modified
+    ? { value: { ...block, [FIELD_ARGUMENTS]: redacted.value }, modified: true }
+    : { value: block, modified: false };
 }
 
 function toolInputAsText(input: unknown): string {
@@ -466,129 +544,174 @@ function getSensitiveFileMutationPath(
   input: Record<string, unknown>,
   config: SentryConfig,
 ): string | undefined {
-  if (toolName !== "edit" && toolName !== "write") return undefined;
+  if (!MUTATING_FILE_TOOLS.has(toolName)) return undefined;
   return typeof input.path === "string" && isSensitivePath(input.path, config) ? input.path : undefined;
+}
+
+type SentryState = {
+  mode: SentryMode;
+  config: SentryConfig;
+};
+
+function handleSentryCommand(args: string, ctx: SentryContext, state: SentryState): void {
+  if (!args.trim()) {
+    notify(ctx, NOTIFICATION_MESSAGES.modeStatus(state.mode), "info");
+    return;
+  }
+
+  const nextMode = parseSentryMode(args);
+  if (!nextMode) {
+    notify(ctx, NOTIFICATION_MESSAGES.modeUsage, "error");
+    return;
+  }
+
+  state.mode = nextMode;
+  notify(ctx, NOTIFICATION_MESSAGES.modeChanged(state.mode), "info");
+}
+
+async function loadConfigForSession(ctx: SentryContext, state: SentryState): Promise<void> {
+  try {
+    state.config = await loadSentryConfig();
+  } catch (error) {
+    state.config = EMPTY_SENTRY_CONFIG;
+    notify(ctx, errorMessage(error), "warning");
+  }
+}
+
+function handleInput(event: any, ctx: SentryContext, mode: SentryMode) {
+  if (mode === MODE_OFF) return { action: "continue" as const };
+
+  const redacted = redactText(event.text);
+  if (!redacted.modified) return { action: "continue" as const };
+
+  notify(ctx, NOTIFICATION_MESSAGES.redactedUserInput, "warning");
+  return { action: "transform" as const, text: redacted.text, images: event.images };
+}
+
+function handleMessageEnd(event: any, ctx: SentryContext, mode: SentryMode) {
+  if (mode === MODE_OFF) return undefined;
+
+  const redacted = redactMessage(event.message);
+  if (!redacted.modified) return undefined;
+
+  notify(ctx, NOTIFICATION_MESSAGES.redactedSessionMessage, "info");
+  return { message: redacted.value as typeof event.message };
+}
+
+function handleToolCall(event: any, ctx: SentryContext, state: SentryState) {
+  if (state.mode !== MODE_STRICT) return undefined;
+
+  const blockReason = getToolCallBlockReason(event, state.config);
+  return blockReason ? blockRiskyOperation(ctx, blockReason) : undefined;
+}
+
+function getToolCallBlockReason(event: any, config: SentryConfig): string | undefined {
+  if (event.toolName === TOOL_READ && typeof event.input.path === "string" && isSensitivePath(event.input.path, config)) {
+    return NOTIFICATION_MESSAGES.blockedSensitiveRead(event.input.path);
+  }
+
+  const sensitiveMutationPath = getSensitiveFileMutationPath(event.toolName, event.input, config);
+  if (sensitiveMutationPath) {
+    return NOTIFICATION_MESSAGES.blockedSensitiveMutation(event.toolName, sensitiveMutationPath);
+  }
+
+  if (event.toolName === TOOL_GREP && isSensitiveGrepInput(event.input, config)) {
+    return NOTIFICATION_MESSAGES.blockedGrep;
+  }
+
+  if (event.toolName === TOOL_BASH && typeof event.input.command === "string" && isSensitiveBashCommand(event.input.command, config)) {
+    return NOTIFICATION_MESSAGES.blockedBashTool;
+  }
+
+  // If a tool argument contains a secret literal, executing it would persist the secret in
+  // tool-call metadata and often in shell history. Block instead of rewriting arguments,
+  // because redaction could silently change command semantics.
+  if (containsSecretLikeText(toolInputAsText(event.input))) {
+    return NOTIFICATION_MESSAGES.blockedSecretToolCall(event.toolName);
+  }
+
+  return undefined;
+}
+
+function handleUserBash(event: any, ctx: SentryContext, state: SentryState) {
+  if (state.mode !== MODE_STRICT) return undefined;
+  if (!isSensitiveBashCommand(event.command, state.config)) return undefined;
+
+  return blockedBashResult(ctx, NOTIFICATION_MESSAGES.blockedUserBash);
+}
+
+function handleToolResult(event: any, ctx: SentryContext, state: SentryState): any {
+  if (state.mode === MODE_OFF) return undefined;
+
+  const sensitiveReadResult = redactSensitiveReadResult(event, ctx, state.config);
+  if (sensitiveReadResult) return sensitiveReadResult;
+
+  const redacted = redactToolResultPayload(event);
+  if (!redacted.modified) return undefined;
+
+  notify(ctx, NOTIFICATION_MESSAGES.redactedToolOutput, "info");
+  return redacted.value;
+}
+
+function redactSensitiveReadResult(event: any, ctx: SentryContext, config: SentryConfig): any {
+  if (event.toolName !== TOOL_READ || typeof event.input.path !== "string" || !isSensitivePath(event.input.path, config)) {
+    return undefined;
+  }
+
+  notify(ctx, NOTIFICATION_MESSAGES.redactedSensitiveFile(event.input.path), "info");
+  return {
+    content: [{ type: "text", text: NOTIFICATION_MESSAGES.redactedSensitiveFileContents(event.input.path) }],
+  };
+}
+
+function redactToolResultPayload(event: any): RedactionResult<any> {
+  let modified = false;
+  const content = redactToolResultContent(event.content);
+  if (content.modified) modified = true;
+
+  const details = redactUnknownValue(event.details);
+  if (details.modified) modified = true;
+
+  return {
+    value: {
+      content: content.value,
+      ...(details.modified ? { details: details.value } : {}),
+    },
+    modified,
+  };
+}
+
+function redactToolResultContent(contentBlocks: any[]): RedactionResult<any[]> {
+  let modified = false;
+  const value = contentBlocks.map((item) => {
+    if (item.type !== "text") return item;
+
+    const redacted = redactText(item.text);
+    if (!redacted.modified) return item;
+
+    modified = true;
+    return { ...item, text: redacted.text };
+  });
+
+  return { value: modified ? value : contentBlocks, modified };
 }
 
 /**
  * Filter or block sensitive data before it reaches the model or long-lived session history.
  */
 export default function (pi: ExtensionAPI) {
-  let mode = DEFAULT_MODE;
-  let config = EMPTY_SENTRY_CONFIG;
+  const state: SentryState = { mode: DEFAULT_MODE, config: EMPTY_SENTRY_CONFIG };
 
-  pi.on("session_start", async (_event, ctx) => {
-    try {
-      config = await loadSentryConfig();
-    } catch (error) {
-      config = EMPTY_SENTRY_CONFIG;
-      notify(ctx, errorMessage(error), "warning");
-    }
+  pi.on(EVENT_SESSION_START, async (_event, ctx) => loadConfigForSession(ctx, state));
+
+  pi.registerCommand(SENTRY_COMMAND_NAME, {
+    description: SENTRY_COMMAND_DESCRIPTION,
+    handler: async (args, ctx) => handleSentryCommand(args, ctx, state),
   });
 
-  pi.registerCommand("sentry", {
-    description: "Show or set pi-sentry mode: strict, redact-only, or off",
-    handler: async (args, ctx) => {
-      if (!args.trim()) {
-        notify(ctx, `pi-sentry mode: ${mode}`, "info");
-        return;
-      }
-
-      const nextMode = parseSentryMode(args);
-      if (!nextMode) {
-        notify(ctx, "Usage: /sentry strict | /sentry redact-only | /sentry off", "error");
-        return;
-      }
-
-      mode = nextMode;
-      notify(ctx, `pi-sentry mode set to ${mode}`, "info");
-    },
-  });
-
-  pi.on("input", async (event, ctx) => {
-    if (mode === "off") return { action: "continue" };
-
-    const redacted = redactText(event.text);
-    if (!redacted.modified) return { action: "continue" };
-
-    notify(ctx, "Sensitive data redacted from user input", "warning");
-    return { action: "transform", text: redacted.text, images: event.images };
-  });
-
-  pi.on("message_end", async (event, ctx) => {
-    if (mode === "off") return undefined;
-
-    const redacted = redactMessage(event.message);
-    if (!redacted.modified) return undefined;
-
-    notify(ctx, "Sensitive data redacted from session message", "info");
-    return { message: redacted.value as typeof event.message };
-  });
-
-  pi.on("tool_call", async (event, ctx) => {
-    if (mode !== "strict") return undefined;
-
-    if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path, config)) {
-      return blockRiskyOperation(ctx, `Blocked read of sensitive file: ${event.input.path}`);
-    }
-
-    const sensitiveMutationPath = getSensitiveFileMutationPath(event.toolName, event.input, config);
-    if (sensitiveMutationPath) {
-      return blockRiskyOperation(ctx, `Blocked ${event.toolName} of sensitive file: ${sensitiveMutationPath}`);
-    }
-
-    if (event.toolName === "grep" && isSensitiveGrepInput(event.input, config)) {
-      return blockRiskyOperation(ctx, "Blocked grep of sensitive path or glob");
-    }
-
-    if (event.toolName === "bash" && typeof event.input.command === "string" && isSensitiveBashCommand(event.input.command, config)) {
-      return blockRiskyOperation(ctx, "Blocked bash command likely to expose secrets");
-    }
-
-    // If a tool argument contains a secret literal, executing it would persist the secret in
-    // tool-call metadata and often in shell history. Block instead of rewriting arguments,
-    // because redaction could silently change command semantics.
-    if (containsSecretLikeText(toolInputAsText(event.input))) {
-      return blockRiskyOperation(ctx, `Blocked ${event.toolName} call containing secret-like text`);
-    }
-
-    return undefined;
-  });
-
-  pi.on("user_bash", async (event, ctx) => {
-    if (mode !== "strict") return undefined;
-    if (!isSensitiveBashCommand(event.command, config)) return undefined;
-
-    return blockedBashResult(ctx, "Blocked user bash command likely to expose secrets");
-  });
-
-  pi.on("tool_result", async (event, ctx) => {
-    if (mode === "off") return undefined;
-
-    if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path, config)) {
-      notify(ctx, `Redacted contents of sensitive file: ${event.input.path}`, "info");
-      return {
-        content: [{ type: "text", text: `[Contents of ${event.input.path} redacted for security]` }],
-      };
-    }
-
-    let wasModified = false;
-    const content = event.content.map((item) => {
-      if (item.type !== "text") return item;
-      const redacted = redactText(item.text);
-      if (redacted.modified) wasModified = true;
-      return redacted.modified ? { ...item, text: redacted.text } : item;
-    });
-
-    const details = redactUnknownValue(event.details);
-    if (details.modified) wasModified = true;
-
-    if (!wasModified) return undefined;
-
-    notify(ctx, "Sensitive data redacted from tool output", "info");
-    return {
-      content,
-      ...(details.modified ? { details: details.value } : {}),
-    };
-  });
+  pi.on(EVENT_INPUT, async (event, ctx) => handleInput(event, ctx, state.mode));
+  pi.on(EVENT_MESSAGE_END, async (event, ctx) => handleMessageEnd(event, ctx, state.mode));
+  pi.on(EVENT_TOOL_CALL, async (event, ctx) => handleToolCall(event, ctx, state));
+  pi.on(EVENT_USER_BASH, async (event, ctx) => handleUserBash(event, ctx, state));
+  pi.on(EVENT_TOOL_RESULT, async (event, ctx) => handleToolResult(event, ctx, state));
 }
