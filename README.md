@@ -91,20 +91,3 @@ npm run lint
 npm run typecheck
 npm test
 ```
-
-## Release
-
-Releases are version-tagged. The release workflow validates that the pushed tag matches `package.json`:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-For the first npm publish, publish the scoped package locally with npm while logged in as the package owner:
-
-```bash
-npm publish --access public --provenance
-```
-
-After the package exists on npm, configure npm Trusted Publishing for `.github/workflows/release.yml` and remove token-based publishing from the workflow.
