@@ -46,22 +46,8 @@ jobs:
             exit 1
           fi
 
-      - name: Verify npm profile
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          NPM_PROFILE="$(npm whoami)"
-          if [ "$NPM_PROFILE" != "kiranpg" ]; then
-            echo "Expected npm profile kiranpg, got $NPM_PROFILE"
-            exit 1
-          fi
-
       - name: Dry-run npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public --dry-run
+        run: npm publish --access public --provenance --dry-run
 
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --access public --provenance
