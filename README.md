@@ -28,6 +28,12 @@ pi-sentry redacts common secret formats:
 
 ## Install
 
+Install from npm:
+
+```bash
+pi install @kirang89/pi-sentry
+```
+
 Install from GitHub:
 
 ```bash
@@ -39,6 +45,8 @@ pi install git:https://github.com/kirang89/pi-sentry.git@v0.1.0
 Try it without installing:
 
 ```bash
+pi -e @kirang89/pi-sentry
+# or
 pi -e git:https://github.com/kirang89/pi-sentry.git
 ```
 
@@ -80,3 +88,20 @@ npm run lint
 npm run typecheck
 npm test
 ```
+
+## Release
+
+Releases are version-tagged. The release workflow validates that the pushed tag matches `package.json`:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+For the first npm publish, publish the scoped package locally with npm while logged in as the package owner:
+
+```bash
+npm publish --access public --provenance
+```
+
+After the package exists on npm, configure npm Trusted Publishing for `.github/workflows/release.yml` and remove token-based publishing from the workflow.
