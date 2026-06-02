@@ -1,10 +1,21 @@
 # pi-sentry
 
-`pi-sentry` is a Pi extension package that reduces accidental secret exposure. It combines pre-execution gates with output/session redaction so secrets are less likely to reach the model, the TUI, or persistent session history.
+pi-sentry is a pi extension that helps protect credentials and secrets.
+
+By default, it redacts secrets from inputs, tool output, and session history. In strict mode, it also blocks risky file reads, searches, commands, and tool calls. You can turn it off when needed.
+
+## What it protects
+
+- **Sensitive file reads**: in strict mode, blocks access to files like `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files.
+- **Shell commands**: in strict mode, blocks commands that may expose secrets, such as `cat .env`, `rg token ~/.aws/credentials`, `printenv`, `gh auth token`, and `kubectl config view --raw`.
+- **Secrets in tool calls**: in strict mode, blocks tool calls that contain secret-like values. It blocks them instead of rewriting them, because rewriting a command can change what it does.
+- **Sensitive path search**: in strict mode, blocks `grep` searches that target sensitive paths or globs.
+- **Tool output**: redacts secrets from tool output, including stderr and error details.
+- Session history: redacts secrets from session text, tool-call arguments, and tool result details.
 
 ## Install
 
-From GitHub:
+Install from GitHub:
 
 ```bash
 pi install git:https://github.com/kirang89/pi-sentry.git
@@ -12,7 +23,7 @@ pi install git:https://github.com/kirang89/pi-sentry.git
 pi install git:https://github.com/kirang89/pi-sentry.git@v0.1.0
 ```
 
-For one-off testing without installing:
+Try it without installing:
 
 ```bash
 pi -e git:https://github.com/kirang89/pi-sentry.git
@@ -20,58 +31,41 @@ pi -e git:https://github.com/kirang89/pi-sentry.git
 
 Reload an active Pi session with `/reload` after installing.
 
-## What it protects
+## Usage
 
-### Sensitive file reads
+Use `/sentry` inside the agent to view or change the mode:
 
-Blocks `read`, `edit`, and `write` access to files such as `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files in strict mode.
+```text
+/sentry
+/sentry strict
+/sentry redact-only
+/sentry off
+```
 
-### Shell exfiltration
+- `/sentry` shows the current mode.
+- `/sentry strict` blocks risky actions and redacts secrets.
+- `/sentry redact-only` allows actions but redacts secrets. This is the default.
+- `/sentry off` disables pi-sentry.
 
-Blocks common tool and user `bash` paths such as `cat .env`, `rg token ~/.aws/credentials`, `printenv`, `gh auth token`, and `kubectl config view --raw` in strict mode.
+## What it redacts
 
-### Literal secrets in tool calls
-
-Blocks tool calls containing secret-like values in strict mode instead of rewriting arguments, because rewriting commands can silently change behavior.
-
-### Search leakage
-
-Blocks `grep` searches targeting sensitive paths or globs in strict mode.
-
-### Tool output leakage
-
-Redacts secrets from tool outputs, including stderr and error details.
-
-### Session history leakage
-
-Redacts text fields in session messages and recursively redacts string fields in tool `details` metadata while skipping image data.
-
-## Redaction coverage
-
-The redactor covers common formats:
+pi-sentry redacts common secret formats:
 
 - JSON: `{ "token": "..." }`
 - YAML/env: `AWS_SECRET_ACCESS_KEY=...`, `password: ...`
 - snake_case and camelCase keys: `db_password`, `dbPassword`, `stripeApiKey`
-- provider tokens: OpenAI, Anthropic, OpenRouter, Google, Cloudflare, npm, GitHub, GitLab, Slack, Stripe, SendGrid, Linear
+- provider tokens: OpenAI, Anthropic, OpenRouter, Google, GitHub, etc.
 - bearer tokens and JWTs
-- URLs with userinfo passwords, including database URLs
+- passwords in URLs, including database URLs
 - private key blocks
 
 ## Modes
 
-The current default is redact-only mode, implemented as a constant in `extensions/sentry.ts`:
+The default mode is `redact-only`.
 
-```ts
-const DEFAULT_MODE = "redact-only";
-```
-
-Switch modes inside Pi with `/sentry strict` or `/sentry redact-only`.
-
-Available modes:
-
-- `strict`: block known risky reads, searches, file mutations, and commands before execution, and redact any secrets that still appear in inputs, outputs, or session messages.
-- `redact-only`: allow tool calls and user bash commands to run, but redact sensitive data from inputs, outputs, and session messages.
+- `strict`: block risky file reads, searches, file changes, and commands. Also redact secrets from inputs, outputs, and session messages.
+- `redact-only`: allow tool calls and user bash commands, but redact secrets from inputs, outputs, and session messages.
+- `off`: disable all pi-sentry blocking and redaction.
 
 ## Development
 
@@ -81,8 +75,3 @@ npm run lint
 npm run typecheck
 npm test
 ```
-
-## CI
-
-GitHub Actions run linting, typechecking, and tests on pushes and pull requests.
-

@@ -53,7 +53,7 @@ async function emit(harness: Harness, eventName: string, event: any): Promise<an
   return result;
 }
 
-async function setSentryMode(harness: Harness, mode: "strict" | "redact-only"): Promise<void> {
+async function setSentryMode(harness: Harness, mode: "strict" | "redact-only" | "off"): Promise<void> {
   const command = harness.commands.sentry;
   assert.ok(command);
   await command.handler(mode, harness.ctx);
@@ -158,11 +158,26 @@ describe("pi-sentry extension modes", () => {
     assert.ok(command);
     await command.handler("", harness.ctx);
     await setSentryMode(harness, "strict");
+    await setSentryMode(harness, "off");
 
     assert.deepEqual(harness.ctx.ui.notifications.map((item) => item.message), [
       "pi-sentry mode: redact-only",
       "pi-sentry mode set to strict",
+      "pi-sentry mode set to off",
     ]);
+  });
+
+  it("shows all modes in the usage message", async () => {
+    const harness = createHarness();
+
+    const command = harness.commands.sentry;
+    assert.ok(command);
+    await command.handler("disabled", harness.ctx);
+
+    assert.deepEqual(harness.ctx.ui.notifications.at(-1), {
+      message: "Usage: /sentry strict | /sentry redact-only | /sentry off",
+      level: "error",
+    });
   });
 
   it("blocks sensitive read, grep, edit, and write tool calls in strict mode", async () => {
@@ -188,6 +203,50 @@ describe("pi-sentry extension modes", () => {
 
     assert.equal(result.result.exitCode, 1);
     assert.match(result.result.output, /Blocked user bash command/);
+  });
+
+  it("turns off blocking and redaction in off mode", async () => {
+    const harness = createHarness();
+    await setSentryMode(harness, "off");
+
+    const readResult = await emit(harness, "tool_call", toolCallEvent("read", { path: ".env" }));
+    assert.equal(readResult, undefined);
+
+    const inputResult = await emit(harness, "input", {
+      type: "input",
+      text: "apiKey=" + "abcdefghijklmnopqrstuvwx",
+      images: undefined,
+      source: "interactive",
+    });
+    assert.deepEqual(inputResult, { action: "continue" });
+
+    const toolResult = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "read-1",
+      toolName: "read",
+      input: { path: ".env" },
+      content: [{ type: "text", text: "apiKey=" + "abcdefghijklmnopqrstuvwx" }],
+      details: { token: "apiKey=" + "abcdefghijklmnopqrstuvwx" },
+      isError: false,
+    });
+    assert.equal(toolResult, undefined);
+
+    const userBashResult = await emit(harness, "user_bash", {
+      type: "user_bash",
+      command: "cat .env",
+      excludeFromContext: false,
+      cwd: process.cwd(),
+    });
+    assert.equal(userBashResult, undefined);
+
+    const messageResult = await emit(harness, "message_end", {
+      type: "message_end",
+      message: {
+        content: "apiKey=" + "abcdefghijklmnopqrstuvwx",
+        details: { token: "apiKey=" + "abcdefghijklmnopqrstuvwx" },
+      },
+    });
+    assert.equal(messageResult, undefined);
   });
 
   it("redacts sensitive user input", async () => {

@@ -13,11 +13,11 @@ type RedactionResult<T> = {
   modified: boolean;
 };
 
-type SentryMode = "strict" | "redact-only";
+type SentryMode = "strict" | "redact-only" | "off";
 
 const DEFAULT_MODE: SentryMode = "redact-only";
 const MAX_REDACTION_DEPTH = 8;
-const SENTRY_MODES = new Set<SentryMode>(["strict", "redact-only"]);
+const SENTRY_MODES = new Set<SentryMode>(["strict", "redact-only", "off"]);
 
 const SECRET_KEY_FRAGMENT =
   "(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]?access[_-]?key)?|token|password|passwd|pwd|private[_-]?key)";
@@ -342,7 +342,7 @@ export default function (pi: ExtensionAPI) {
   let mode = DEFAULT_MODE;
 
   pi.registerCommand("sentry", {
-    description: "Show or set pi-sentry mode: strict or redact-only",
+    description: "Show or set pi-sentry mode: strict, redact-only, or off",
     handler: async (args, ctx) => {
       if (!args.trim()) {
         notify(ctx, `pi-sentry mode: ${mode}`, "info");
@@ -351,7 +351,7 @@ export default function (pi: ExtensionAPI) {
 
       const nextMode = parseSentryMode(args);
       if (!nextMode) {
-        notify(ctx, "Usage: /sentry strict | /sentry redact-only", "error");
+        notify(ctx, "Usage: /sentry strict | /sentry redact-only | /sentry off", "error");
         return;
       }
 
@@ -361,6 +361,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("input", async (event, ctx) => {
+    if (mode === "off") return { action: "continue" };
+
     const redacted = redactText(event.text);
     if (!redacted.modified) return { action: "continue" };
 
@@ -369,6 +371,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_end", async (event, ctx) => {
+    if (mode === "off") return undefined;
+
     const redacted = redactMessage(event.message);
     if (!redacted.modified) return undefined;
 
@@ -377,7 +381,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (mode === "redact-only") return undefined;
+    if (mode !== "strict") return undefined;
 
     if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path)) {
       return blockRiskyOperation(ctx, `Blocked read of sensitive file: ${event.input.path}`);
@@ -407,13 +411,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("user_bash", async (event, ctx) => {
-    if (mode === "redact-only") return undefined;
+    if (mode !== "strict") return undefined;
     if (!isSensitiveBashCommand(event.command)) return undefined;
 
     return blockedBashResult(ctx, "Blocked user bash command likely to expose secrets");
   });
 
   pi.on("tool_result", async (event, ctx) => {
+    if (mode === "off") return undefined;
+
     if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path)) {
       notify(ctx, `Redacted contents of sensitive file: ${event.input.path}`, "info");
       return {
