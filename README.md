@@ -47,6 +47,24 @@ Use `/sentry` inside the agent to view or change the mode:
 - `/sentry redact-only` allows actions but redacts secrets. This is the default.
 - `/sentry off` disables pi-sentry.
 
+## Config
+
+Create `~/.pi/agent/pi-sentry.json` to add custom path rules:
+
+```json
+{
+  "allowPaths": [".env.local.example"],
+  "blockPaths": ["private/**", "*.secret.json"]
+}
+```
+
+- User rules override built-in rules.
+- If a path matches both `allowPaths` and `blockPaths`, pi-sentry blocks it.
+- Plain filenames like `.env` match any path segment.
+- Glob patterns support `*`, `**`, and `?`.
+
+Run `/reload` after changing this file.
+
 ## What it redacts
 
 pi-sentry redacts common secret formats:

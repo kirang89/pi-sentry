@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type ReplacementFunction = (match: string, ...args: any[]) => string;
@@ -15,9 +18,15 @@ type RedactionResult<T> = {
 
 type SentryMode = "strict" | "redact-only" | "off";
 
+export type SentryConfig = {
+  allowPaths: string[];
+  blockPaths: string[];
+};
+
 const DEFAULT_MODE: SentryMode = "redact-only";
 const MAX_REDACTION_DEPTH = 8;
 const SENTRY_MODES = new Set<SentryMode>(["strict", "redact-only", "off"]);
+const EMPTY_SENTRY_CONFIG: SentryConfig = { allowPaths: [], blockPaths: [] };
 
 const SECRET_KEY_FRAGMENT =
   "(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]?access[_-]?key)?|token|password|passwd|pwd|private[_-]?key)";
@@ -125,27 +134,57 @@ export function normalizePathForSentry(path: string): string {
   return path.replace(/^@/, "").replace(/\\/g, "/");
 }
 
-export function isSensitivePath(path: string): boolean {
+export function parseSentryConfig(value: unknown): SentryConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("pi-sentry config must be a JSON object");
+  }
+
+  const input = value as Record<string, unknown>;
+  return {
+    allowPaths: parsePathList(input.allowPaths, "allowPaths"),
+    blockPaths: parsePathList(input.blockPaths, "blockPaths"),
+  };
+}
+
+export async function loadSentryConfig(configDir = getDefaultPiConfigDir()): Promise<SentryConfig> {
+  const configPath = join(configDir, "pi-sentry.json");
+
+  try {
+    const content = await readFile(configPath, "utf8");
+    return parseSentryConfig(JSON.parse(content));
+  } catch (error) {
+    if (isMissingFileError(error)) return EMPTY_SENTRY_CONFIG;
+    throw new Error(`Failed to load ${configPath}: ${errorMessage(error)}`, { cause: error });
+  }
+}
+
+export function isSensitivePath(path: string, config: SentryConfig = EMPTY_SENTRY_CONFIG): boolean {
   const normalized = normalizePathForSentry(path);
+
+  // User rules intentionally override built-in defaults. If user rules conflict,
+  // blocking wins because exposing a secret is harder to recover from than over-blocking.
+  if (matchesConfiguredPath(normalized, config.blockPaths)) return true;
+  if (matchesConfiguredPath(normalized, config.allowPaths)) return false;
+
   if (nonSensitiveExampleFilePatterns.some((pattern) => pattern.test(normalized))) return false;
   return sensitiveFilePatterns.some((pattern) => pattern.test(normalized));
 }
 
-export function isSensitiveBashCommand(command: string): boolean {
+export function isSensitiveBashCommand(command: string, config: SentryConfig = EMPTY_SENTRY_CONFIG): boolean {
   // We block env/auth dump commands outright because their purpose is to expose credentials.
   if (bashSecretDumpCommands.test(command)) return true;
 
   // We only block general read/filter commands when they mention a sensitive path. This avoids
   // breaking normal grep/rg usage while closing the common `cat .env` bypass.
-  return bashSensitiveReadCommands.test(command) && containsSensitivePathReference(command);
+  return bashSensitiveReadCommands.test(command) && containsSensitivePathReference(command, config);
 }
 
 export function containsSecretLikeText(text: string): boolean {
   return redactText(text).modified;
 }
 
-function containsSensitivePathReference(text: string): boolean {
-  return extractPathLikeTokens(text).some(isSensitivePath);
+function containsSensitivePathReference(text: string, config: SentryConfig): boolean {
+  return extractPathLikeTokens(text).some((token) => isSensitivePath(token, config));
 }
 
 function extractPathLikeTokens(text: string): string[] {
@@ -153,6 +192,87 @@ function extractPathLikeTokens(text: string): string[] {
     .split(/[\s'"`]+/)
     .map((token) => token.replace(/^[({[]+|[),;\]}]+$/g, ""))
     .filter(Boolean);
+}
+
+function parsePathList(value: unknown, fieldName: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error(`${fieldName} must be an array of strings`);
+
+  return value.map((item, index) => {
+    if (typeof item !== "string" || !item.trim()) {
+      throw new Error(`${fieldName}[${index}] must be a non-empty string`);
+    }
+    return item.trim();
+  });
+}
+
+function getDefaultPiConfigDir(): string {
+  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function matchesConfiguredPath(path: string, patterns: string[]): boolean {
+  const normalizedPath = normalizePathForSentry(path).replace(/^\.\//, "");
+  const pathSegments = normalizedPath.split("/").filter(Boolean);
+
+  return patterns.some((pattern) => {
+    const normalizedPattern = normalizePathForSentry(pattern).replace(/^\.\//, "");
+    if (!hasGlobSyntax(normalizedPattern) && !normalizedPattern.includes("/")) {
+      return pathSegments.includes(normalizedPattern);
+    }
+
+    return globMatchesPath(normalizedPattern, normalizedPath);
+  });
+}
+
+function hasGlobSyntax(pattern: string): boolean {
+  return /[*?]/.test(pattern);
+}
+
+function globMatchesPath(pattern: string, path: string): boolean {
+  const source = globToRegExpSource(pattern);
+  const prefix = pattern.startsWith("/") ? "^" : "(^|.*/)";
+  return new RegExp(`${prefix}${source}$`).test(path);
+}
+
+function globToRegExpSource(pattern: string): string {
+  let source = "";
+
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    const next = pattern[index + 1];
+
+    if (char === "*" && next === "*") {
+      source += ".*";
+      index += 1;
+      continue;
+    }
+
+    if (char === "*") {
+      source += "[^/]*";
+      continue;
+    }
+
+    if (char === "?") {
+      source += "[^/]";
+      continue;
+    }
+
+    source += escapeRegExp(char ?? "");
+  }
+
+  return source;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function redactUnknownValue(
@@ -326,13 +446,17 @@ function blockedBashResult(ctx: SentryContext, reason: string) {
   };
 }
 
-function isSensitiveGrepInput(input: Record<string, unknown>): boolean {
-  return [input.path, input.glob].some((value) => typeof value === "string" && isSensitivePath(value));
+function isSensitiveGrepInput(input: Record<string, unknown>, config: SentryConfig): boolean {
+  return [input.path, input.glob].some((value) => typeof value === "string" && isSensitivePath(value, config));
 }
 
-function getSensitiveFileMutationPath(toolName: string, input: Record<string, unknown>): string | undefined {
+function getSensitiveFileMutationPath(
+  toolName: string,
+  input: Record<string, unknown>,
+  config: SentryConfig,
+): string | undefined {
   if (toolName !== "edit" && toolName !== "write") return undefined;
-  return typeof input.path === "string" && isSensitivePath(input.path) ? input.path : undefined;
+  return typeof input.path === "string" && isSensitivePath(input.path, config) ? input.path : undefined;
 }
 
 /**
@@ -340,6 +464,16 @@ function getSensitiveFileMutationPath(toolName: string, input: Record<string, un
  */
 export default function (pi: ExtensionAPI) {
   let mode = DEFAULT_MODE;
+  let config = EMPTY_SENTRY_CONFIG;
+
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      config = await loadSentryConfig();
+    } catch (error) {
+      config = EMPTY_SENTRY_CONFIG;
+      notify(ctx, errorMessage(error), "warning");
+    }
+  });
 
   pi.registerCommand("sentry", {
     description: "Show or set pi-sentry mode: strict, redact-only, or off",
@@ -383,20 +517,20 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, ctx) => {
     if (mode !== "strict") return undefined;
 
-    if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path)) {
+    if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path, config)) {
       return blockRiskyOperation(ctx, `Blocked read of sensitive file: ${event.input.path}`);
     }
 
-    const sensitiveMutationPath = getSensitiveFileMutationPath(event.toolName, event.input);
+    const sensitiveMutationPath = getSensitiveFileMutationPath(event.toolName, event.input, config);
     if (sensitiveMutationPath) {
       return blockRiskyOperation(ctx, `Blocked ${event.toolName} of sensitive file: ${sensitiveMutationPath}`);
     }
 
-    if (event.toolName === "grep" && isSensitiveGrepInput(event.input)) {
+    if (event.toolName === "grep" && isSensitiveGrepInput(event.input, config)) {
       return blockRiskyOperation(ctx, "Blocked grep of sensitive path or glob");
     }
 
-    if (event.toolName === "bash" && typeof event.input.command === "string" && isSensitiveBashCommand(event.input.command)) {
+    if (event.toolName === "bash" && typeof event.input.command === "string" && isSensitiveBashCommand(event.input.command, config)) {
       return blockRiskyOperation(ctx, "Blocked bash command likely to expose secrets");
     }
 
@@ -412,7 +546,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("user_bash", async (event, ctx) => {
     if (mode !== "strict") return undefined;
-    if (!isSensitiveBashCommand(event.command)) return undefined;
+    if (!isSensitiveBashCommand(event.command, config)) return undefined;
 
     return blockedBashResult(ctx, "Blocked user bash command likely to expose secrets");
   });
@@ -420,7 +554,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_result", async (event, ctx) => {
     if (mode === "off") return undefined;
 
-    if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path)) {
+    if (event.toolName === "read" && typeof event.input.path === "string" && isSensitivePath(event.input.path, config)) {
       notify(ctx, `Redacted contents of sensitive file: ${event.input.path}`, "info");
       return {
         content: [{ type: "text", text: `[Contents of ${event.input.path} redacted for security]` }],

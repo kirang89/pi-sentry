@@ -1,9 +1,14 @@
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import sentryExtension, {
   containsSecretLikeText,
   isSensitiveBashCommand,
   isSensitivePath,
+  loadSentryConfig,
+  parseSentryConfig,
   redactText,
 } from "../extensions/sentry.ts";
 
@@ -116,6 +121,52 @@ describe("isSensitivePath", () => {
     assert.equal(isSensitivePath("secrets.example.yaml"), false);
     assert.equal(isSensitivePath("config.template.json"), false);
   });
+
+  it("lets user allow paths override built-in blocks", () => {
+    assert.equal(isSensitivePath(".env", { allowPaths: [".env"], blockPaths: [] }), false);
+  });
+
+  it("lets user block paths override built-in allows", () => {
+    assert.equal(isSensitivePath(".env.example", { allowPaths: [], blockPaths: [".env.example"] }), true);
+  });
+
+  it("blocks when user allow and block rules conflict", () => {
+    const config = { allowPaths: [".env"], blockPaths: [".env"] };
+    assert.equal(isSensitivePath(".env", config), true);
+  });
+
+  it("matches configured glob paths", () => {
+    const config = { allowPaths: [], blockPaths: ["private/**", "*.secret.json"] };
+    assert.equal(isSensitivePath("private/token.txt", config), true);
+    assert.equal(isSensitivePath("config/api.secret.json", config), true);
+  });
+});
+
+describe("pi-sentry config", () => {
+  it("parses allow and block paths", () => {
+    assert.deepEqual(parseSentryConfig({ allowPaths: [".env"], blockPaths: ["private/**"] }), {
+      allowPaths: [".env"],
+      blockPaths: ["private/**"],
+    });
+  });
+
+  it("rejects invalid path lists", () => {
+    assert.throws(() => parseSentryConfig({ allowPaths: ".env" }), /allowPaths must be an array/);
+    assert.throws(() => parseSentryConfig({ blockPaths: [""] }), /blockPaths\[0\]/);
+  });
+
+  it("loads config from a pi-sentry.json file", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+    await writeFile(join(configDir, "pi-sentry.json"), JSON.stringify({ allowPaths: [".env"], blockPaths: [] }));
+
+    assert.deepEqual(await loadSentryConfig(configDir), { allowPaths: [".env"], blockPaths: [] });
+  });
+
+  it("uses empty config when pi-sentry.json is missing", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+
+    assert.deepEqual(await loadSentryConfig(configDir), { allowPaths: [], blockPaths: [] });
+  });
 });
 
 describe("isSensitiveBashCommand", () => {
@@ -132,6 +183,14 @@ describe("isSensitiveBashCommand", () => {
 
   it("does not block ordinary searches", () => {
     assert.equal(isSensitiveBashCommand("rg token src"), false);
+  });
+
+  it("uses configured path allow rules for bash reads", () => {
+    assert.equal(isSensitiveBashCommand("cat .env", { allowPaths: [".env"], blockPaths: [] }), false);
+  });
+
+  it("uses configured path block rules for bash reads", () => {
+    assert.equal(isSensitiveBashCommand("cat .env.example", { allowPaths: [], blockPaths: [".env.example"] }), true);
   });
 });
 
@@ -203,6 +262,28 @@ describe("pi-sentry extension modes", () => {
 
     assert.equal(result.result.exitCode, 1);
     assert.match(result.result.output, /Blocked user bash command/);
+  });
+
+  it("uses loaded config for strict mode path blocking", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+    await writeFile(
+      join(configDir, "pi-sentry.json"),
+      JSON.stringify({ allowPaths: [".env"], blockPaths: [".env.example"] }),
+    );
+
+    const originalConfigDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = configDir;
+    try {
+      const harness = createHarness();
+      await emit(harness, "session_start", { type: "session_start", reason: "startup" });
+      await setSentryMode(harness, "strict");
+
+      assert.equal(await emit(harness, "tool_call", toolCallEvent("read", { path: ".env" })), undefined);
+      assert.equal((await emit(harness, "tool_call", toolCallEvent("read", { path: ".env.example" }))).block, true);
+    } finally {
+      if (originalConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = originalConfigDir;
+    }
   });
 
   it("turns off blocking and redaction in off mode", async () => {
