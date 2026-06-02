@@ -1,5 +1,8 @@
 # pi-sentry
 
+[![CI](https://github.com/kirang89/pi-sentry/actions/workflows/ci.yml/badge.svg)](https://github.com/kirang89/pi-sentry/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@kiranpg/pi-sentry.svg)](https://www.npmjs.com/package/@kiranpg/pi-sentry)
+
 pi-sentry is a pi extension that helps protect credentials and secrets.
 
 By default, it redacts secrets from inputs, tool output, and session history. In strict mode, it also blocks risky file reads, searches, commands, and tool calls. You can turn it off when needed.
