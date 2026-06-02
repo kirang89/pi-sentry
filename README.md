@@ -8,7 +8,7 @@ By default, it redacts secrets from inputs, tool output, and session history. In
 
 pi-sentry protects against:
 
-- **Sensitive file reads**: in strict mode, blocks access to files like `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files.
+- **Sensitive file reads**: in strict mode, blocks access to files and directories like `.env`, `.npmrc`, `.aws/credentials`, `.kube/config`, `.ssh/`, `.docker/config.json`, private keys, Terraform state/vars, and service-account JSON files.
 - **Sensitive shell commands**: in strict mode, blocks commands that may expose secrets, such as `cat .env`, `echo $OPENAI_API_KEY`, scripts that echo secret env vars, `rg token ~/.aws/credentials`, `printenv`, `gh auth token`, and `kubectl config view --raw`.
 - **Secrets in tool calls**: in strict mode, blocks tool calls that contain secret-like values.
 - **Sensitive path search**: in strict mode, blocks `grep` searches that target sensitive paths or globs.
@@ -23,7 +23,8 @@ pi-sentry redacts common secret formats:
 - provider tokens: OpenAI, Anthropic, OpenRouter, Google, GitHub, etc.
 - bearer tokens and JWTs
 - passwords in URLs, including database URLs
-- private key blocks
+- private key blocks, including env values like `PRIVATE_KEY=...`
+- session cookies, such as `SESSION_COOKIE=...`
 
 ## Install
 
@@ -46,14 +47,6 @@ Reload an active Pi session with `/reload` after installing.
 ## Usage
 
 Use `/sentry` inside the agent to view or change the mode:
-
-```text
-/sentry
-/sentry strict
-/sentry redact-only
-/sentry off
-```
-
 - `/sentry` shows the current mode.
 - `/sentry strict` blocks risky actions and redacts secrets.
 - `/sentry redact-only` allows actions but redacts secrets. This is the default.
