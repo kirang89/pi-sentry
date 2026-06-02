@@ -17,6 +17,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
+    "lint": "eslint .",
     "test": "tsx --test tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -30,8 +31,12 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*",
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.15.0",
+    "eslint": "^10.4.1",
+    "globals": "^17.6.0",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.60.1"
   }
 }

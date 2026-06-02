@@ -77,7 +77,12 @@ Available modes:
 
 ```bash
 npm install
-npm test
+npm run lint
 npm run typecheck
+npm test
 ```
+
+## CI
+
+GitHub Actions run linting, typechecking, and tests on pushes and pull requests.
 

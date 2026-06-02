@@ -23,12 +23,12 @@ const SECRET_KEY_FRAGMENT =
   "(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|client[_-]?secret|secret(?:[_-]?access[_-]?key)?|token|password|passwd|pwd|private[_-]?key)";
 
 const quotedSecretValuePattern = new RegExp(
-  `((?:^|[\\s{,;])['\"]?[\\w.-]*${SECRET_KEY_FRAGMENT}[\\w.-]*['\"]?\\s*[:=]\\s*)(['\"])(?:\\\\.|(?!\\2)[^\\\\\\r\\n]){8,}\\2`,
+  `((?:^|[\\s{,;])['"]?[\\w.-]*${SECRET_KEY_FRAGMENT}[\\w.-]*['"]?\\s*[:=]\\s*)(['"])(?:\\\\.|(?!\\2)[^\\\\\\r\\n]){8,}\\2`,
   "gim",
 );
 
 const unquotedSecretValuePattern = new RegExp(
-  `((?:^|[\\s{,;])['\"]?[\\w.-]*${SECRET_KEY_FRAGMENT}[\\w.-]*['\"]?\\s*[:=]\\s*)([^\\s'\",}\\]]{8,})`,
+  `((?:^|[\\s{,;])['"]?[\\w.-]*${SECRET_KEY_FRAGMENT}[\\w.-]*['"]?\\s*[:=]\\s*)([^\\s'",}\\]]{8,})`,
   "gim",
 );
 
