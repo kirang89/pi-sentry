@@ -47,6 +47,13 @@ const bashSensitiveReadCommands =
 const bashSecretDumpCommands =
   /(?:^|[;&|]\s*)(?:env|printenv|set|export\s+-p|gh\s+auth\s+token|npm\s+token|kubectl\s+config\s+view\s+--raw|gcloud\s+auth\s+application-default\s+print-access-token|aws\s+configure\s+export-credentials|security\s+find-generic-password\b.*\s-w\b|pass\s+show)\b/i;
 
+const SECRET_ENV_VAR_NAME = `[A-Za-z_][A-Za-z0-9_]*${SECRET_KEY_FRAGMENT}[A-Za-z0-9_]*`;
+const SECRET_ENV_VAR_REFERENCE = `(?:\\$${SECRET_ENV_VAR_NAME}\\b|\\$\\{!?${SECRET_ENV_VAR_NAME}[^}]*\\})`;
+const bashSecretEnvEchoCommands = new RegExp(
+  `(?:^|[\\s;&|()'"])(?:echo|printf)\\b[^;&|]*${SECRET_ENV_VAR_REFERENCE}`,
+  "i",
+);
+
 export const sensitivePatterns: SensitivePattern[] = [
   { pattern: /\b(sk-ant-[a-zA-Z0-9_-]{20,})\b/g, replacement: "[ANTHROPIC_KEY_REDACTED]" },
   { pattern: /\b(sk-or-v1-[a-zA-Z0-9_-]{20,})\b/g, replacement: "[OPENROUTER_KEY_REDACTED]" },
@@ -173,6 +180,10 @@ export function isSensitivePath(path: string, config: SentryConfig = EMPTY_SENTR
 export function isSensitiveBashCommand(command: string, config: SentryConfig = EMPTY_SENTRY_CONFIG): boolean {
   // We block env/auth dump commands outright because their purpose is to expose credentials.
   if (bashSecretDumpCommands.test(command)) return true;
+
+  // Echoing secret-looking environment variables exposes the values without putting the
+  // secret literal in the command, so block it before the shell can expand the variable.
+  if (bashSecretEnvEchoCommands.test(command)) return true;
 
   // We only block general read/filter commands when they mention a sensitive path. This avoids
   // breaking normal grep/rg usage while closing the common `cat .env` bypass.

@@ -181,6 +181,22 @@ describe("isSensitiveBashCommand", () => {
     assert.equal(isSensitiveBashCommand("kubectl config view --raw"), true);
   });
 
+  it("blocks echoing secret-looking environment variables", () => {
+    assert.equal(isSensitiveBashCommand("echo $OPENAI_API_KEY"), true);
+    assert.equal(isSensitiveBashCommand('printf "%s\\n" "$GITHUB_TOKEN"'), true);
+    assert.equal(isSensitiveBashCommand("echo ${AWS_SECRET_ACCESS_KEY}"), true);
+  });
+
+  it("blocks echoing secret-looking environment variables inside scripts", () => {
+    assert.equal(isSensitiveBashCommand("bash -lc 'echo $OPENAI_API_KEY'"), true);
+    assert.equal(isSensitiveBashCommand("cat > /tmp/debug.sh <<'EOF'\necho $DATABASE_PASSWORD\nEOF"), true);
+  });
+
+  it("does not block ordinary echo commands", () => {
+    assert.equal(isSensitiveBashCommand("echo $PATH"), false);
+    assert.equal(isSensitiveBashCommand("echo token"), false);
+  });
+
   it("does not block ordinary searches", () => {
     assert.equal(isSensitiveBashCommand("rg token src"), false);
   });
@@ -262,6 +278,22 @@ describe("pi-sentry extension modes", () => {
 
     assert.equal(result.result.exitCode, 1);
     assert.match(result.result.output, /Blocked user bash command/);
+  });
+
+  it("blocks echoing secret environment variables in strict mode", async () => {
+    const harness = createHarness();
+    await setSentryMode(harness, "strict");
+
+    const toolResult = await emit(harness, "tool_call", toolCallEvent("bash", { command: "echo $OPENAI_API_KEY" }));
+    assert.equal(toolResult.block, true);
+
+    const userBashResult = await emit(harness, "user_bash", {
+      type: "user_bash",
+      command: "printf '%s\\n' \"$GITHUB_TOKEN\"",
+      excludeFromContext: false,
+      cwd: process.cwd(),
+    });
+    assert.equal(userBashResult.result.exitCode, 1);
   });
 
   it("uses loaded config for strict mode path blocking", async () => {
