@@ -34,7 +34,7 @@ pi-sentry redacts common secret formats:
 Install from npm:
 
 ```bash
-pi install @kiranpg/pi-sentry
+pi install npm:@kiranpg/pi-sentry
 ```
 
 Install from GitHub:
@@ -48,7 +48,7 @@ pi install git:https://github.com/kirang89/pi-sentry.git@v0.1.0
 Try it without installing:
 
 ```bash
-pi -e @kiranpg/pi-sentry
+pi -e npm:@kiranpg/pi-sentry
 # or
 pi -e git:https://github.com/kirang89/pi-sentry.git
 ```

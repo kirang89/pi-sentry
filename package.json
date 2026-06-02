@@ -1,6 +1,6 @@
 {
   "name": "@kiranpg/pi-sentry",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Pi extension that blocks sensitive file reads and redacts secrets before they reach the model or session history.",
   "files": [
     "extensions",
@@ -28,6 +28,11 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "*",
