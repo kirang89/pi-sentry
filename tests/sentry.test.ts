@@ -427,6 +427,10 @@ describe("pi-sentry extension modes", () => {
       text: "Authorization: Bearer [REDACTED]",
       images: undefined,
     });
+    assert.deepEqual(harness.ctx.ui.notifications.at(-1), {
+      message: "Sensitive data redacted from user input",
+      level: "warning",
+    });
   });
 
   it("redacts sensitive read results in redact-only mode", async () => {
@@ -444,6 +448,24 @@ describe("pi-sentry extension modes", () => {
     });
 
     assert.deepEqual(result.content, [{ type: "text", text: "[Contents of .env redacted for security]" }]);
+    assert.deepEqual(harness.ctx.ui.notifications.at(-1), {
+      message: "Redacted contents of sensitive file: .env",
+      level: "info",
+    });
+  });
+
+  it("notifies the user when it redacts session history", async () => {
+    const harness = createHarness();
+    const result = await emit(harness, "message_end", {
+      type: "message_end",
+      message: { content: "apiKey=" + "abcdefghijklmnopqrstuvwx" },
+    });
+
+    assert.equal((result.message as { content: string }).content, "apiKey=[REDACTED]");
+    assert.deepEqual(harness.ctx.ui.notifications.at(-1), {
+      message: "Sensitive data redacted from session message",
+      level: "info",
+    });
   });
 
   it("redacts arbitrary details.data fields while preserving image data", async () => {
@@ -465,6 +487,10 @@ describe("pi-sentry extension modes", () => {
 
     assert.equal(result.details.data, "apiKey=[REDACTED]");
     assert.equal(result.details.image.data, secretData);
+    assert.deepEqual(harness.ctx.ui.notifications.at(-1), {
+      message: "Sensitive data redacted from tool output",
+      level: "info",
+    });
   });
 
   it("redacts repeated object references without leaking the original object", async () => {

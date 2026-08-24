@@ -61,7 +61,7 @@ Use `/sentry` inside the agent to view or change the mode:
 - `/sentry` shows the current mode.
 - `/sentry strict` blocks risky actions and redacts secrets.
 - `/sentry redact-only` allows actions but redacts secrets. This is the default.
-- `/sentry off` disables pi-sentry.
+- `/sentry off` disables pi-sentry, equivalent to uninstalling it for the current session.
 
 ## Config
 
