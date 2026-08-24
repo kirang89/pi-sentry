@@ -1,6 +1,6 @@
 {
   "name": "@kiranpg/pi-sentry",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A Pi extension that blocks sensitive file reads and redacts secrets before they reach the model or session history.",
   "repository": {
     "type": "git",
