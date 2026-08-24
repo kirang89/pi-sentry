@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -154,9 +154,10 @@ describe("isSensitivePath", () => {
   });
 
   it("matches configured glob paths", () => {
-    const config = { allowPaths: [], blockPaths: ["private/**", "*.secret.json"] };
+    const config = { allowPaths: [], blockPaths: ["private/**", "*.secret.json", "**/private.txt"] };
     assert.equal(isSensitivePath("private/token.txt", config), true);
     assert.equal(isSensitivePath("config/api.secret.json", config), true);
+    assert.equal(isSensitivePath("private.txt", config), true);
   });
 });
 
@@ -193,10 +194,12 @@ describe("isSensitiveBashCommand", () => {
     assert.equal(isSensitiveBashCommand("rg token ~/.aws/credentials"), true);
   });
 
-  it("blocks known secret dump commands", () => {
-    assert.equal(isSensitiveBashCommand("printenv"), true);
-    assert.equal(isSensitiveBashCommand("gh auth token"), true);
-    assert.equal(isSensitiveBashCommand("kubectl config view --raw"), true);
+  it("blocks sensitive commands after newlines and through shell wrappers", () => {
+    assert.equal(isSensitiveBashCommand("printf ok\ncat .env"), true);
+    assert.equal(isSensitiveBashCommand("bash -c 'cat .env'"), true);
+    assert.equal(isSensitiveBashCommand("cp .env /tmp/exposed"), true);
+    assert.equal(isSensitiveBashCommand("FILE=.env; cat \"$FILE\""), true);
+    assert.equal(isSensitiveBashCommand("printf ok\nprintenv"), true);
   });
 
   it("blocks echoing secret-looking environment variables", () => {
@@ -263,8 +266,8 @@ describe("pi-sentry extension modes", () => {
     await setSentryMode(harness, "strict");
     await setSentryMode(harness, "off");
 
-    assert.deepEqual(harness.ctx.ui.notifications.map((item) => item.message), [
-      "pi-sentry mode: redact-only",
+    assert.match(harness.ctx.ui.notifications[0]?.message ?? "", /^pi-sentry mode: redact-only\n✗ .+pi-sentry\.json not loaded$/);
+    assert.deepEqual(harness.ctx.ui.notifications.slice(1).map((item) => item.message), [
       "pi-sentry mode set to strict",
       "pi-sentry mode set to off",
     ]);
@@ -289,6 +292,9 @@ describe("pi-sentry extension modes", () => {
 
     assert.equal((await emit(harness, "tool_call", toolCallEvent("read", { path: ".env" }))).block, true);
     assert.equal((await emit(harness, "tool_call", toolCallEvent("grep", { pattern: "token", path: ".env" }))).block, true);
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("grep", { pattern: "token", glob: "*.env" }))).block, true);
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("grep", { pattern: "token", glob: "**/.env" }))).block, true);
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("grep", { pattern: "token", glob: "*.netrc" }))).block, true);
     assert.equal((await emit(harness, "tool_call", toolCallEvent("edit", { path: ".env", edits: [] }))).block, true);
     assert.equal((await emit(harness, "tool_call", toolCallEvent("write", { path: ".env", content: "TOKEN=value" }))).block, true);
   });
@@ -304,6 +310,56 @@ describe("pi-sentry extension modes", () => {
       await emit(harness, "tool_call", toolCallEvent("write", { path: "notes.txt", content: "safe content" })),
       undefined,
     );
+  });
+
+  it("blocks reads through symlinks to sensitive files in strict mode", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+    const sensitivePath = join(directory, ".env");
+    const aliasPath = join(directory, "settings.txt");
+    await writeFile(sensitivePath, "API_KEY=secret");
+    await symlink(sensitivePath, aliasPath);
+
+    const harness = createHarness();
+    await setSentryMode(harness, "strict");
+
+    assert.equal((await emit(harness, "tool_call", toolCallEvent("read", { path: aliasPath }))).block, true);
+  });
+
+  it("blocks mutations through symlinked sensitive directories in strict mode", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+    const sensitiveDirectory = join(directory, ".ssh");
+    const aliasDirectory = join(directory, "settings");
+    await mkdir(sensitiveDirectory);
+    await symlink(sensitiveDirectory, aliasDirectory);
+
+    const harness = createHarness();
+    await setSentryMode(harness, "strict");
+
+    assert.equal(
+      (await emit(harness, "tool_call", toolCallEvent("write", { path: join(aliasDirectory, "config.new"), content: "safe" }))).block,
+      true,
+    );
+  });
+
+  it("redacts reads through symlinks to sensitive files in redact-only mode", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+    const sensitivePath = join(directory, ".env");
+    const aliasPath = join(directory, "settings.txt");
+    await writeFile(sensitivePath, "API_KEY=opaque-value");
+    await symlink(sensitivePath, aliasPath);
+
+    const harness = createHarness();
+    const result = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "read-1",
+      toolName: "read",
+      input: { path: aliasPath },
+      content: [{ type: "text", text: "API_KEY=opaque-value" }],
+      details: undefined,
+      isError: false,
+    });
+
+    assert.deepEqual(result.content, [{ type: "text", text: `[Contents of ${aliasPath} redacted for security]` }]);
   });
 
   it("blocks .ssh directory access in strict mode", async () => {
@@ -343,6 +399,74 @@ describe("pi-sentry extension modes", () => {
       cwd: process.cwd(),
     });
     assert.equal(userBashResult.result.exitCode, 1);
+  });
+
+  it("shows mode and loaded config path in /sentry status", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+    const configPath = join(configDir, "pi-sentry.json");
+    await writeFile(configPath, JSON.stringify({ allowPaths: [], blockPaths: [] }));
+
+    const originalConfigDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = configDir;
+    try {
+      const harness = createHarness();
+      await emit(harness, "session_start", { type: "session_start", reason: "startup" });
+      const command = harness.commands.sentry;
+      assert.ok(command);
+      await command.handler("", harness.ctx);
+
+      assert.deepEqual(harness.ctx.ui.notifications.at(-1), {
+        message: `pi-sentry mode: redact-only\n✓ ${configPath} loaded`,
+        level: "info",
+      });
+    } finally {
+      if (originalConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = originalConfigDir;
+    }
+  });
+
+  it("shows a failed config load in /sentry status", async () => {
+    const configDir = await mkdtemp(join(tmpdir(), "pi-sentry-"));
+    const configPath = join(configDir, "pi-sentry.json");
+    await writeFile(configPath, "not JSON");
+
+    const originalConfigDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = configDir;
+    try {
+      const harness = createHarness();
+      await emit(harness, "session_start", { type: "session_start", reason: "startup" });
+      const command = harness.commands.sentry;
+      assert.ok(command);
+      await command.handler("", harness.ctx);
+
+      assert.deepEqual(harness.ctx.ui.notifications.at(-1), {
+        message: `pi-sentry mode: redact-only\n✗ ${configPath} not loaded`,
+        level: "info",
+      });
+    } finally {
+      if (originalConfigDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = originalConfigDir;
+    }
+  });
+
+  it("redacts secrets nested more than eight levels deep in tool details", async () => {
+    const harness = createHarness();
+    let details: Record<string, unknown> = { value: "apiKey=abcdefghijklmnopqrstuvwx" };
+    for (let depth = 0; depth < 9; depth += 1) details = { nested: details };
+
+    const result = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "custom-1",
+      toolName: "custom",
+      input: {},
+      content: [],
+      details,
+      isError: false,
+    });
+
+    let redacted = result.details as Record<string, unknown>;
+    for (let depth = 0; depth < 9; depth += 1) redacted = redacted.nested as Record<string, unknown>;
+    assert.equal(redacted.value, "apiKey=[REDACTED]");
   });
 
   it("uses loaded config for strict mode path blocking", async () => {
@@ -491,6 +615,25 @@ describe("pi-sentry extension modes", () => {
       message: "Sensitive data redacted from tool output",
       level: "info",
     });
+  });
+
+  it("redacts cyclic tool details without recursing indefinitely", async () => {
+    const harness = createHarness();
+    const details: Record<string, unknown> = { token: "apiKey=abcdefghijklmnopqrstuvwx" };
+    details.self = details;
+
+    const result = await emit(harness, "tool_result", {
+      type: "tool_result",
+      toolCallId: "custom-1",
+      toolName: "custom",
+      input: {},
+      content: [],
+      details,
+      isError: false,
+    });
+
+    assert.equal(result.details.token, "apiKey=[REDACTED]");
+    assert.equal(result.details.self, result.details);
   });
 
   it("redacts repeated object references without leaking the original object", async () => {

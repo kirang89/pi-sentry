@@ -8,8 +8,7 @@
   },
   "files": [
     "extensions",
-    "README.md",
-    "adrs"
+    "README.md"
   ],
   "keywords": [
     "pi-package",
@@ -31,7 +30,7 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.78.0 <0.79.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-coding-agent": {
@@ -39,7 +38,7 @@
     }
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-coding-agent": "0.78.0",
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.15.0",
     "eslint": "^10.4.1",

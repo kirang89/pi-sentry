@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 type ReplacementFunction = (match: string, ...args: any[]) => string;
@@ -29,7 +29,6 @@ const MODE_OFF: SentryMode = "off";
 const SENTRY_MODE_VALUES = [MODE_STRICT, MODE_REDACT_ONLY, MODE_OFF] as const;
 
 const DEFAULT_MODE: SentryMode = MODE_REDACT_ONLY;
-const MAX_REDACTION_DEPTH = 8;
 const SENTRY_MODES = new Set<SentryMode>(SENTRY_MODE_VALUES);
 const EMPTY_SENTRY_CONFIG: SentryConfig = { allowPaths: [], blockPaths: [] };
 
@@ -93,11 +92,8 @@ const unquotedSecretValuePattern = new RegExp(
   "gim",
 );
 
-const bashSensitiveReadCommands =
-  /(?:^|[;&|]\s*)(?:cat|less|more|head|tail|grep|rg|awk|sed|strings|xxd|hexdump|base64|python3?|node|perl|ruby)\b/i;
-
 const bashSecretDumpCommands =
-  /(?:^|[;&|]\s*)(?:env|printenv|set|export\s+-p|gh\s+auth\s+token|npm\s+token|kubectl\s+config\s+view\s+--raw|gcloud\s+auth\s+application-default\s+print-access-token|aws\s+configure\s+export-credentials|security\s+find-generic-password\b.*\s-w\b|pass\s+show)\b/i;
+  /(?:^|[\s;&|])(?:env|printenv|set|export\s+-p|gh\s+auth\s+token|npm\s+token|kubectl\s+config\s+view\s+--raw|gcloud\s+auth\s+application-default\s+print-access-token|aws\s+configure\s+export-credentials|security\s+find-generic-password\b.*\s-w\b|pass\s+show)\b/i;
 
 const SECRET_ENV_VAR_NAME = `[A-Za-z_][A-Za-z0-9_]*${SECRET_KEY_FRAGMENT}[A-Za-z0-9_]*`;
 const SECRET_ENV_VAR_REFERENCE = `(?:\\$${SECRET_ENV_VAR_NAME}\\b|\\$\\{!?${SECRET_ENV_VAR_NAME}[^}]*\\})`;
@@ -207,14 +203,23 @@ export function parseSentryConfig(value: unknown): SentryConfig {
   };
 }
 
+type LoadedSentryConfig = {
+  config: SentryConfig;
+  loaded: boolean;
+};
+
 export async function loadSentryConfig(configDir = getDefaultPiConfigDir()): Promise<SentryConfig> {
-  const configPath = join(configDir, SENTRY_CONFIG_FILE_NAME);
+  return (await loadSentryConfigWithStatus(configDir)).config;
+}
+
+async function loadSentryConfigWithStatus(configDir: string): Promise<LoadedSentryConfig> {
+  const configPath = getSentryConfigPath(configDir);
 
   try {
     const content = await readFile(configPath, "utf8");
-    return parseSentryConfig(JSON.parse(content));
+    return { config: parseSentryConfig(JSON.parse(content)), loaded: true };
   } catch (error) {
-    if (isMissingFileError(error)) return EMPTY_SENTRY_CONFIG;
+    if (isMissingFileError(error)) return { config: EMPTY_SENTRY_CONFIG, loaded: false };
     throw new Error(`Failed to load ${configPath}: ${errorMessage(error)}`, { cause: error });
   }
 }
@@ -232,16 +237,13 @@ export function isSensitivePath(path: string, config: SentryConfig = EMPTY_SENTR
 }
 
 export function isSensitiveBashCommand(command: string, config: SentryConfig = EMPTY_SENTRY_CONFIG): boolean {
-  // We block env/auth dump commands outright because their purpose is to expose credentials.
-  if (bashSecretDumpCommands.test(command)) return true;
-
-  // Echoing secret-looking environment variables exposes the values without putting the
-  // secret literal in the command, so block it before the shell can expand the variable.
-  if (bashSecretEnvEchoCommands.test(command)) return true;
-
-  // We only block general read/filter commands when they mention a sensitive path. This avoids
-  // breaking normal grep/rg usage while closing the common `cat .env` bypass.
-  return bashSensitiveReadCommands.test(command) && containsSensitivePathReference(command, config);
+  // Shell syntax is too flexible to identify only file-reading commands reliably. In strict
+  // mode, conservatively block any command that references a sensitive path or secret source.
+  return (
+    bashSecretDumpCommands.test(command) ||
+    bashSecretEnvEchoCommands.test(command) ||
+    containsSensitivePathReference(command, config)
+  );
 }
 
 export function containsSecretLikeText(text: string): boolean {
@@ -249,12 +251,17 @@ export function containsSecretLikeText(text: string): boolean {
 }
 
 function containsSensitivePathReference(text: string, config: SentryConfig): boolean {
-  return extractPathLikeTokens(text).some((token) => isSensitivePath(token, config));
+  return extractPathLikeTokens(expandShellSeparators(text)).some((token) => isSensitivePath(token, config));
+}
+
+function expandShellSeparators(text: string): string {
+  return text.replace(/\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*/g, " ");
 }
 
 function extractPathLikeTokens(text: string): string[] {
   return text
     .split(/[\s'"`]+/)
+    .map((token) => token.replace(/^[A-Za-z_][A-Za-z0-9_]*=/, ""))
     .map((token) => token.replace(/^[({[]+|[),;\]}]+$/g, ""))
     .filter(Boolean);
 }
@@ -273,6 +280,10 @@ function parsePathList(value: unknown, fieldName: string): string[] {
 
 function getDefaultPiConfigDir(): string {
   return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ...DEFAULT_PI_CONFIG_DIR_SEGMENTS);
+}
+
+function getSentryConfigPath(configDir = getDefaultPiConfigDir()): string {
+  return join(configDir, SENTRY_CONFIG_FILE_NAME);
 }
 
 function isMissingFileError(error: unknown): boolean {
@@ -315,6 +326,12 @@ function globToRegExpSource(pattern: string): string {
     const next = pattern[index + 1];
 
     if (char === "*" && next === "*") {
+      if (pattern[index + 2] === "/") {
+        source += "(?:.*/)?";
+        index += 2;
+        continue;
+      }
+
       source += ".*";
       index += 1;
       continue;
@@ -344,18 +361,17 @@ type RedactionCache = WeakMap<object, RedactionResult<unknown>>;
 
 function redactUnknownValue(
   value: unknown,
-  depth = 0,
   cache: RedactionCache = new WeakMap<object, RedactionResult<unknown>>(),
 ): RedactionResult<unknown> {
   if (typeof value === "string") return redactStringValue(value);
-  if (!canRedactNestedValue(value, depth)) return { value, modified: false };
+  if (!canRedactNestedValue(value)) return { value, modified: false };
 
   const cached = cache.get(value);
   if (cached) return cached;
 
   return Array.isArray(value)
-    ? redactArrayValue(value, depth, cache)
-    : redactObjectValue(value as Record<string, unknown>, depth, cache);
+    ? redactArrayValue(value, cache)
+    : redactObjectValue(value as Record<string, unknown>, cache);
 }
 
 function redactStringValue(value: string): RedactionResult<string> {
@@ -363,18 +379,18 @@ function redactStringValue(value: string): RedactionResult<string> {
   return { value: redacted.text, modified: redacted.modified };
 }
 
-function canRedactNestedValue(value: unknown, depth: number): value is object {
-  return value !== null && typeof value === "object" && depth < MAX_REDACTION_DEPTH;
+function canRedactNestedValue(value: unknown): value is object {
+  return value !== null && typeof value === "object";
 }
 
-function redactArrayValue(value: unknown[], depth: number, cache: RedactionCache): RedactionResult<unknown> {
+function redactArrayValue(value: unknown[], cache: RedactionCache): RedactionResult<unknown> {
   const next: unknown[] = [];
   const result: RedactionResult<unknown> = { value: next, modified: false };
   cache.set(value, result);
 
   let modified = false;
   for (const item of value) {
-    const redacted = redactUnknownValue(item, depth + 1, cache);
+    const redacted = redactUnknownValue(item, cache);
     if (redacted.modified) modified = true;
     next.push(redacted.value);
   }
@@ -384,11 +400,7 @@ function redactArrayValue(value: unknown[], depth: number, cache: RedactionCache
   return result;
 }
 
-function redactObjectValue(
-  value: Record<string, unknown>,
-  depth: number,
-  cache: RedactionCache,
-): RedactionResult<unknown> {
+function redactObjectValue(value: Record<string, unknown>, cache: RedactionCache): RedactionResult<unknown> {
   const next: Record<string, unknown> = {};
   const result: RedactionResult<unknown> = { value: next, modified: false };
   cache.set(value, result);
@@ -402,7 +414,7 @@ function redactObjectValue(
 
     // Cache redacted objects so repeated references reuse the safe copy instead of leaking
     // the original object through a later reference.
-    const redacted = redactUnknownValue(child, depth + 1, cache);
+    const redacted = redactUnknownValue(child, cache);
     if (redacted.modified) modified = true;
     next[key] = redacted.value;
   }
@@ -535,27 +547,90 @@ function blockedBashResult(ctx: SentryContext, reason: string) {
   };
 }
 
+const SENSITIVE_GLOB_EXAMPLES = [
+  ".env",
+  ".env.local",
+  ".dev.vars",
+  "secrets/value",
+  "credentials/value",
+  ".npmrc",
+  ".pypirc",
+  ".netrc",
+  ".dockercfg",
+  ".docker/config.json",
+  ".kube/config",
+  ".aws/credentials",
+  ".gcloud/application_default_credentials.json",
+  ".ssh/config",
+  "terraform.tfstate",
+  "terraform.tfstate.backup",
+  "terraform.tfvars",
+  "terraform.tfvars.json",
+  "service-account.json",
+  "private.key",
+  "certificate.pem",
+];
+
 function isSensitiveGrepInput(input: Record<string, unknown>, config: SentryConfig): boolean {
-  return [input.path, input.glob].some((value) => typeof value === "string" && isSensitivePath(value, config));
+  return (
+    (typeof input.path === "string" && isSensitivePath(input.path, config)) ||
+    (typeof input.glob === "string" && isSensitiveGlob(input.glob, config))
+  );
 }
 
-function getSensitiveFileMutationPath(
+function isSensitiveGlob(glob: string, config: SentryConfig): boolean {
+  if (isSensitivePath(glob, config)) return true;
+  const normalizedGlob = normalizePathForSentry(glob);
+  return SENSITIVE_GLOB_EXAMPLES.some(
+    (path) => isSensitivePath(path, config) && globMatchesPath(normalizedGlob, path),
+  );
+}
+
+async function getSensitiveFileMutationPath(
   toolName: string,
   input: Record<string, unknown>,
   config: SentryConfig,
-): string | undefined {
-  if (!MUTATING_FILE_TOOLS.has(toolName)) return undefined;
-  return typeof input.path === "string" && isSensitivePath(input.path, config) ? input.path : undefined;
+): Promise<string | undefined> {
+  if (!MUTATING_FILE_TOOLS.has(toolName) || typeof input.path !== "string") return undefined;
+  return (await isSensitiveFilePath(input.path, config)) ? input.path : undefined;
+}
+
+async function isSensitiveFilePath(path: string, config: SentryConfig): Promise<boolean> {
+  if (isSensitivePath(path, config)) return true;
+
+  const resolved = await resolvePathThroughExistingAncestor(path);
+  return resolved !== undefined && isSensitivePath(resolved, config);
+}
+
+async function resolvePathThroughExistingAncestor(path: string): Promise<string | undefined> {
+  let candidate = path;
+  const missingSegments: string[] = [];
+
+  while (true) {
+    try {
+      return join(await realpath(candidate), ...missingSegments);
+    } catch (error) {
+      if (!isMissingFileError(error)) return undefined;
+
+      const parent = dirname(candidate);
+      if (parent === candidate) return undefined;
+      missingSegments.unshift(basename(candidate));
+      candidate = parent;
+    }
+  }
 }
 
 type SentryState = {
   mode: SentryMode;
   config: SentryConfig;
+  configPath: string;
+  configLoaded: boolean;
 };
 
 function handleSentryCommand(args: string, ctx: SentryContext, state: SentryState): void {
   if (!args.trim()) {
-    notify(ctx, NOTIFICATION_MESSAGES.modeStatus(state.mode), "info");
+    const configStatus = state.configLoaded ? `✓ ${state.configPath} loaded` : `✗ ${state.configPath} not loaded`;
+    notify(ctx, `${NOTIFICATION_MESSAGES.modeStatus(state.mode)}\n${configStatus}`, "info");
     return;
   }
 
@@ -570,10 +645,14 @@ function handleSentryCommand(args: string, ctx: SentryContext, state: SentryStat
 }
 
 async function loadConfigForSession(ctx: SentryContext, state: SentryState): Promise<void> {
+  state.configPath = getSentryConfigPath();
   try {
-    state.config = await loadSentryConfig();
+    const loaded = await loadSentryConfigWithStatus(getDefaultPiConfigDir());
+    state.config = loaded.config;
+    state.configLoaded = loaded.loaded;
   } catch (error) {
     state.config = EMPTY_SENTRY_CONFIG;
+    state.configLoaded = false;
     notify(ctx, errorMessage(error), "warning");
   }
 }
@@ -598,19 +677,23 @@ function handleMessageEnd(event: any, ctx: SentryContext, mode: SentryMode) {
   return { message: redacted.value as typeof event.message };
 }
 
-function handleToolCall(event: any, ctx: SentryContext, state: SentryState) {
+async function handleToolCall(event: any, ctx: SentryContext, state: SentryState) {
   if (state.mode !== MODE_STRICT) return undefined;
 
-  const blockReason = getToolCallBlockReason(event, state.config);
+  const blockReason = await getToolCallBlockReason(event, state.config);
   return blockReason ? blockRiskyOperation(ctx, blockReason) : undefined;
 }
 
-function getToolCallBlockReason(event: any, config: SentryConfig): string | undefined {
-  if (event.toolName === TOOL_READ && typeof event.input.path === "string" && isSensitivePath(event.input.path, config)) {
+async function getToolCallBlockReason(event: any, config: SentryConfig): Promise<string | undefined> {
+  if (
+    event.toolName === TOOL_READ &&
+    typeof event.input.path === "string" &&
+    (await isSensitiveFilePath(event.input.path, config))
+  ) {
     return NOTIFICATION_MESSAGES.blockedSensitiveRead(event.input.path);
   }
 
-  const sensitiveMutationPath = getSensitiveFileMutationPath(event.toolName, event.input, config);
+  const sensitiveMutationPath = await getSensitiveFileMutationPath(event.toolName, event.input, config);
   if (sensitiveMutationPath) {
     return NOTIFICATION_MESSAGES.blockedSensitiveMutation(event.toolName, sensitiveMutationPath);
   }
@@ -640,10 +723,10 @@ function handleUserBash(event: any, ctx: SentryContext, state: SentryState) {
   return blockedBashResult(ctx, NOTIFICATION_MESSAGES.blockedUserBash);
 }
 
-function handleToolResult(event: any, ctx: SentryContext, state: SentryState): any {
+async function handleToolResult(event: any, ctx: SentryContext, state: SentryState): Promise<any> {
   if (state.mode === MODE_OFF) return undefined;
 
-  const sensitiveReadResult = redactSensitiveReadResult(event, ctx, state.config);
+  const sensitiveReadResult = await redactSensitiveReadResult(event, ctx, state.config);
   if (sensitiveReadResult) return sensitiveReadResult;
 
   const redacted = redactToolResultPayload(event);
@@ -653,8 +736,12 @@ function handleToolResult(event: any, ctx: SentryContext, state: SentryState): a
   return redacted.value;
 }
 
-function redactSensitiveReadResult(event: any, ctx: SentryContext, config: SentryConfig): any {
-  if (event.toolName !== TOOL_READ || typeof event.input.path !== "string" || !isSensitivePath(event.input.path, config)) {
+async function redactSensitiveReadResult(event: any, ctx: SentryContext, config: SentryConfig): Promise<any> {
+  if (
+    event.toolName !== TOOL_READ ||
+    typeof event.input.path !== "string" ||
+    !(await isSensitiveFilePath(event.input.path, config))
+  ) {
     return undefined;
   }
 
@@ -700,7 +787,12 @@ function redactToolResultContent(contentBlocks: any[]): RedactionResult<any[]> {
  * Filter or block sensitive data before it reaches the model or long-lived session history.
  */
 export default function (pi: ExtensionAPI) {
-  const state: SentryState = { mode: DEFAULT_MODE, config: EMPTY_SENTRY_CONFIG };
+  const state: SentryState = {
+    mode: DEFAULT_MODE,
+    config: EMPTY_SENTRY_CONFIG,
+    configPath: getSentryConfigPath(),
+    configLoaded: false,
+  };
 
   pi.on(EVENT_SESSION_START, async (_event, ctx) => loadConfigForSession(ctx, state));
 
